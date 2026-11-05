@@ -154,6 +154,10 @@ bitwise identical to a server started without the option
 server started without `--projection-vector` fails with a 400 error rather
 than silently running unsteered, and `--projection-vector` on a model
 without the feature fails at startup. The value must be a boolean.
+`--projection-default-on` (which requires `--projection-vector`) flips the
+default: requests without the field then steer, and an explicit
+`"projection": false` still opts out per request; the projection state
+keeps out of cross-state prompt-cache reuse in either direction.
 
 Prompt caching keeps the two states apart: while a vector is loaded, every
 cache identity (including each image-prefix boundary) carries the request's

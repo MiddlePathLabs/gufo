@@ -1,6 +1,7 @@
 #include "src/cli/serve/inference_backend.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -47,6 +48,19 @@ void RequireProjectionSupport(const ChatRequest& request,
         "projection requested but this model has no projection vector "
         "loaded (--projection-vector)");
   }
+}
+
+// The server-level projection default (--projection-default-on) resolved
+// into the request, so every downstream decision — capability check,
+// prompt-cache identity, scheduled metadata — sees one explicit value.
+ChatRequest ApplyProjectionDefault(const ChatRequest& request,
+                                   const std::atomic<bool>& default_on) {
+  ChatRequest defaulted = request;
+  if (!defaulted.projection.has_value() &&
+      default_on.load(std::memory_order_relaxed)) {
+    defaulted.projection = true;
+  }
+  return defaulted;
 }
 
 }  // namespace
@@ -107,6 +121,10 @@ struct InferenceBackend::Impl {
     std::string model_path;
     std::string build_info;
   };
+  // Server-level projection default, set once from --projection-default-on
+  // before the server listens; read per request. Requests still override
+  // with an explicit ChatRequest::projection.
+  std::atomic<bool> projection_default{false};
 
   class ScheduledGenerationRequest final : public GenerationRequest {
   public:
@@ -605,6 +623,10 @@ void InferenceBackend::set_reasoning_defaults(
 #endif
 }
 
+void InferenceBackend::set_projection_default(bool enabled) {
+  impl_->projection_default.store(enabled, std::memory_order_relaxed);
+}
+
 InferenceBackend::Result InferenceBackend::complete(
     std::string_view prompt, std::size_t max_tokens,
     const sampling::SamplingConfig& sampling_config,
@@ -648,9 +670,14 @@ InferenceBackend::Result InferenceBackend::chat(
     return {};
   }
   auto effective_sampling = sampling_config;
-  auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
+  // Resolve the server-level default once, so the capability check, the
+  // prompt-cache identity and the scheduled request all see the same
+  // explicit value.
+  const auto defaulted =
+      ApplyProjectionDefault(request, impl_->projection_default);
+  auto constrained = ConstrainChatRequest(defaulted, state->scheduler->runner(),
                                           &effective_sampling);
-  const auto& effective_request = constrained ? *constrained : request;
+  const auto& effective_request = constrained ? *constrained : defaulted;
   RequireProjectionSupport(effective_request, state->scheduler->runner());
   auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
@@ -738,10 +765,12 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   auto effective_sampling = sampling_config;
   std::optional<sampling::JsonConstraint::ToolFormat> tool_format;
   std::string tool_dialect;
+  const auto defaulted =
+      ApplyProjectionDefault(request, impl_->projection_default);
   auto constrained =
-      ConstrainChatRequest(request, state->scheduler->runner(),
+      ConstrainChatRequest(defaulted, state->scheduler->runner(),
                            &effective_sampling, &tool_format, &tool_dialect);
-  const auto& effective_request = constrained ? *constrained : request;
+  const auto& effective_request = constrained ? *constrained : defaulted;
   RequireProjectionSupport(effective_request, state->scheduler->runner());
   auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
