@@ -1541,6 +1541,7 @@ int RunServe(std::span<const char* const> args) {
     std::string vision_model_path;
     std::string projection_vector_path;
     std::string projection_layers;
+    bool projection_default_on = false;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
     // Parsed for the deprecated --prefill-chunk only; never used.
@@ -1647,6 +1648,11 @@ int RunServe(std::span<const char* const> args) {
                          "Steered layer range for --projection-vector "
                          "(default: every layer the vector carries)",
                          "Model", &projection_layers);
+    llm_parser.AddFlag("", "--projection-default-on",
+                       "Requests without a projection field steer; an "
+                       "explicit \"projection\": false still opts out "
+                       "(requires --projection-vector)",
+                       "Model", &projection_default_on);
     llm_parser.AddOption(
         "-d", "--draft-tokens", "N",
         "Deprecated and ignored: each model sets its draft length",
@@ -1839,6 +1845,11 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: --projection-layers requires --projection-vector\n";
       return 2;
     }
+    if (projection_default_on && projection_vector_path.empty()) {
+      std::cerr
+          << "Error: --projection-default-on requires --projection-vector\n";
+      return 2;
+    }
     std::string err;
     ModelLoadLog load_log("text", model);
     server::TextSpeculativeConfig loaded_speculative = speculative_config;
@@ -1912,6 +1923,9 @@ int RunServe(std::span<const char* const> args) {
         max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
         sampling_config, SamplingOptionsSupplied(llm_parser));
     backend->set_reasoning_defaults(*reasoning_defaults);
+    if (projection_default_on) {
+      backend->set_projection_default(true);
+    }
     const auto effective_sampling =
         backend->sampling_defaults().Resolve(reasoning_defaults->enabled);
     server::ChatRequest default_request;

@@ -131,6 +131,11 @@ public:
                              sampling::SamplingOverrides supplied =
                                  sampling::SamplingOverrides::All());
   void set_reasoning_defaults(const ReasoningOptions& reasoning);
+  /// Server-level default for the per-request projection opt-in
+  /// (ChatRequest::projection): with this set, a request without the field
+  /// steers, and an explicit `"projection": false` still opts out. Enabled
+  /// by --projection-default-on, which requires a loaded vector.
+  void set_projection_default(bool enabled);
 
   /// Plain text completion (no chat framing).
   Result complete(std::string_view prompt, std::size_t max_tokens,
