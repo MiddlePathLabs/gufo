@@ -93,6 +93,9 @@ public:
             const std::string& vision_model_path = {},
             TextRunnerRamCacheOptions ram_cache_config = {},
             bool enable_yarn = false,
+            const std::string& projection_vector_path = {},
+            std::uint32_t projection_layer_lo = 1,
+            std::uint32_t projection_layer_hi = 0,
             const PrepareRunnerOptions& prepare_runner_options = {},
             const LoadProgress& on_progress = {});
 
