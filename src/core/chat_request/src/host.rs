@@ -26,6 +26,7 @@ pub enum Op {
     ConstrainedTools = 21,
     NamespaceKey = 22,
     NamespaceValue = 23,
+    Projection = 24,
     Tool = 30,
     ToolDescription = 31,
     ToolParameters = 32,

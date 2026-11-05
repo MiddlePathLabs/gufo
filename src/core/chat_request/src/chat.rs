@@ -126,6 +126,7 @@ pub fn decode(text: &[u8], defaults: &Defaults, host: &mut impl Host) -> Outcome
 
     draft.stream = flag(&body, "stream", "invalid_stream")?;
     draft.return_progress = flag(&body, "return_progress", "invalid_return_progress")?;
+    draft.projection = flag(&body, "projection", "invalid_projection")?;
     if let Some(options) = non_null(&body, "stream_options") {
         if !matches!(options, Value::Object(_)) {
             return Err(bad_request(

@@ -135,6 +135,8 @@ typedef enum GufoChatOp {
   /* tool_namespaces[key] = value. */
   GUFO_CHAT_OP_NAMESPACE_KEY = 22,   /* [text] */
   GUFO_CHAT_OP_NAMESPACE_VALUE = 23, /* [text] */
+  /* ChatRequest::projection, assigned. */
+  GUFO_CHAT_OP_PROJECTION = 24, /* [int] */
   /* Appends a ChatTool after the request's current ones. */
   GUFO_CHAT_OP_TOOL = 30,             /* [text] name */
   GUFO_CHAT_OP_TOOL_DESCRIPTION = 31, /* [text] */

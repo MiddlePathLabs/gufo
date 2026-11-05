@@ -183,6 +183,7 @@ pub struct Draft {
     pub cache_prompt: Option<bool>,
     pub cache_persist: Option<bool>,
     pub return_progress: Option<bool>,
+    pub projection: Option<bool>,
     pub add_vision_id: Option<bool>,
     pub reasoning: Reasoning,
     pub tools: Tools,
@@ -199,6 +200,7 @@ impl Draft {
             cache_prompt: None,
             cache_persist: None,
             return_progress: None,
+            projection: None,
             add_vision_id: None,
             reasoning,
             tools,
@@ -220,6 +222,7 @@ impl Draft {
             (Op::CachePrompt, self.cache_prompt),
             (Op::CachePersist, self.cache_persist),
             (Op::ReturnProgress, self.return_progress),
+            (Op::Projection, self.projection),
             (Op::AddVisionId, self.add_vision_id),
         ];
         for (op, value) in flags {

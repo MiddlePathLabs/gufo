@@ -354,6 +354,9 @@ struct Decoder {
       case GUFO_CHAT_OP_RETURN_PROGRESS:
         chat.return_progress = on;
         return;
+      case GUFO_CHAT_OP_PROJECTION:
+        chat.projection = on;
+        return;
       case GUFO_CHAT_OP_ADD_VISION_ID:
         chat.add_vision_id = on;
         return;
