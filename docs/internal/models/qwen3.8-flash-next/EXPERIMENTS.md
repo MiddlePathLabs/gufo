@@ -1,5 +1,26 @@
 # Qwen3.8 Flash-Next experiments
 
+## N-gram row cache and reader (November 18, 2026)
+
+The PLE table holds 320,001,536 IQ4_NL rows of 90 bytes; each token gathers
+16 of them. Every uncached row costs one 4 KiB `O_DIRECT` read, so a cold
+request reads 166–395 MB from the SSD. The row cache is direct-mapped with a
+power-of-two entry count: the 128 MiB budget holds 1,048,576 rows (90 MiB).
+Trials ran fresh processes with the page cache evicted, greedy decoding,
+alternating arm order and the component cache off unless stated; every
+greedy output matched across arms.
+
+| Experiment | Outcome |
+| --- | --- |
+| Larger row cache (`GUFO_NGRAM_CACHE_BYTES`) | Retained as an option. On a resent 116k-token history (1.52M unique rows), hit rates follow the entry count alone: 1.05M entries 47%, 2.09M 65.3%, 4.19M 79.9%, 16.7M 94.6%. A 2 GiB budget (1.5 GiB of rows, +1.59 GiB RSS) cut SSD reads 10.7× and reader CPU 6× on cache-missed 129k-token resends, with no change in time to first token or decode speed. |
+| 2- and 4-way set-associative cache | Rejected: at the same budget, ways only remove sets and add busy-slot contention. 4 ways at 256 MiB hit 31% against 65% direct-mapped. |
+| Single-thread `io_uring` reader, depth 128 | Not merged: 2.0–2.6× less reader CPU than the 128-thread `pread` pool, but the reader is 1.5–3.3% of process CPU and no latency moved beyond ±0.5%. It also needs `io_uring_enter` in a seccomp profile. Depth 64 had a better median and a slower drain; depth 256 a worse tail. |
+| Per-request gather wait and disk bytes | Retained in the request log (`ngram_wait_ms`, `ngram_disk_bytes`). The trial build timed three of the four wait sites, missing the graph pass, and measured waits of 0.2–7% of time to first token; prefill stayed compute-bound near 1,630 tokens/s. |
+
+A component-cache hit skips prefill and the row cache entirely (1,280 rows,
+75 ms against 71 s to first token); the row cache matters only for cold
+prompts, cache-missed resends and suffix extension.
+
 ## Sampled MTP decode (November 13, 2026)
 
 Main `6858788b`, default sampling (thinking on: temperature 1, top-k 20,

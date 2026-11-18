@@ -588,6 +588,15 @@ void TestCounters() {
     Check(b.rows == 3 && b.dedup_rows == 2 && b.cache_hits == 0 &&
               b.disk_reads == 1,
           "second owner copies rows the first one read");
+    // Unbuffered reads transfer whole pages; buffered reads the row alone.
+    const std::uint64_t per_read =
+        a.disk_bytes / std::max<std::uint64_t>(1, a.disk_reads);
+    Check((per_read == table->RowBytes() || per_read == 4096) &&
+              a.disk_bytes == a.disk_reads * per_read &&
+              b.disk_bytes == b.disk_reads * per_read,
+          "disk bytes follow the reads each owner paid for");
+    Check(a.gather_wait_ns == 0 && b.gather_wait_ns == 0,
+          "the table itself charges no gather wait");
 
     const std::array whole{q::NgramGatherOwner{ids.size(), &first}};
     Check(table->Read(ids, out) && table->StartRead(ids, out, whole) &&
@@ -623,6 +632,47 @@ void TestCounters() {
   table.reset();
   std::filesystem::remove(path);
 }
+
+// The row-cache budget parses GUFO_NGRAM_CACHE_BYTES values strictly and
+// clamps, and the default budget's power-of-two entry count is what the
+// production IQ4_NL geometry actually caches.
+void TestCacheBudget() {
+  using T = q::NgramTable;
+  Check(T::CacheBudget(nullptr) == T::kDefaultCacheBytes &&
+            T::CacheBudget("") == T::kDefaultCacheBytes,
+        "unset budget keeps the default");
+  Check(T::CacheBudget("2147483648") == (std::size_t{2} << 30),
+        "budget parses bytes");
+  Check(T::CacheBudget("0") == 0, "zero disables the row cache");
+  Check(T::CacheBudget("abc") == T::kDefaultCacheBytes &&
+            T::CacheBudget("12MiB") == T::kDefaultCacheBytes &&
+            T::CacheBudget("-1") == T::kDefaultCacheBytes &&
+            T::CacheBudget(" -1") == T::kDefaultCacheBytes &&
+            T::CacheBudget("+5") == T::kDefaultCacheBytes,
+        "malformed budgets keep the default");
+  Check(T::CacheBudget("99999999999999") == T::kMaxCacheBytes &&
+            T::CacheBudget("999999999999999999999999") == T::kMaxCacheBytes,
+        "oversized budgets clamp");
+
+  TemporaryDirectory temp("qwen38-ngram-budget");
+  const auto path = temp.path() / "iq4.bin";
+  constexpr std::uint32_t dim = 160;  // production geometry: 90-byte rows
+  constexpr std::uint32_t rows = 4;
+  {
+    std::ofstream out(path, std::ios::binary);
+    const std::vector<char> bytes(rows * (dim / 32 * 18), 0);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  }
+  std::string error;
+  if (std::getenv("GUFO_NGRAM_CACHE_BYTES") == nullptr) {
+    auto table =
+        OpenTable(path, 0, rows, dim, gufo::core::GgmlType::kIQ4_NL, &error);
+    Check(table != nullptr, error.c_str());
+    if (table)
+      Check(table->RowBytes() == 90 && table->CacheRows() == (1u << 20),
+            "default budget holds 2^20 rows (90 MiB) of 90-byte rows");
+  }
+}
 }  // namespace
 
 int main() {
@@ -635,6 +685,7 @@ int main() {
   TestQ8Rows();
   TestDistantRows();
   TestCounters();
+  TestCacheBudget();
   if (failures != 0) {
     std::fprintf(stderr, "%d failures\n", failures);
     return 1;

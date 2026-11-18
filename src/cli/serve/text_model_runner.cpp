@@ -1046,8 +1046,12 @@ TextRunnerNgramRows TextRunnerPool::Request::ngram_rows() const {
   const auto now = impl_->runner->NgramRows(
       dynamic_cast<const TextRunnerState&>(impl_->lease->state()));
   const auto& base = impl_->ngram_baseline;
-  return {now.rows - base.rows, now.dedup_rows - base.dedup_rows,
-          now.cache_hits - base.cache_hits, now.disk_reads - base.disk_reads};
+  return {now.rows - base.rows,
+          now.dedup_rows - base.dedup_rows,
+          now.cache_hits - base.cache_hits,
+          now.disk_reads - base.disk_reads,
+          now.disk_bytes - base.disk_bytes,
+          now.gather_wait_ms - base.gather_wait_ms};
 }
 
 bool TextRunnerPool::Request::cache_disk_hit() const noexcept {
