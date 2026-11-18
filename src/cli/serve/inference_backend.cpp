@@ -109,6 +109,11 @@ std::size_t CountReasoningTokens(
 }
 
 struct InferenceBackend::Impl {
+  // Server-level projection default, set once from --projection-default-on
+  // before the server listens; read per request. Requests still override
+  // with an explicit ChatRequest::projection. Outside the HIP guard: the
+  // setter runs on every preset, so a HIP-only placement breaks cpu builds.
+  std::atomic<bool> projection_default{false};
 #if defined(ENGINE_ENABLE_HIP)
   struct State {
     std::shared_ptr<TextGenerationScheduler> scheduler;
@@ -121,10 +126,6 @@ struct InferenceBackend::Impl {
     std::string model_path;
     std::string build_info;
   };
-  // Server-level projection default, set once from --projection-default-on
-  // before the server listens; read per request. Requests still override
-  // with an explicit ChatRequest::projection.
-  std::atomic<bool> projection_default{false};
 
   class ScheduledGenerationRequest final : public GenerationRequest {
   public:
