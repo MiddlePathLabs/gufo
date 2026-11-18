@@ -74,7 +74,7 @@ reserves the configured capacity when it starts.
 Gufo reads the model's n-gram embedding table from disk and keeps recently used
 rows in a 90 MiB RAM cache. For long histories that you resend after they leave
 the prompt cache, set `GUFO_NGRAM_CACHE_BYTES` when you start the server:
-`GUFO_NGRAM_CACHE_BYTES=2147483648` keeps 1.5 GiB of rows. As of November 2026,
+`GUFO_NGRAM_CACHE_BYTES=2147483648` keeps 1,440 MiB of rows. As of November 2026,
 that cut disk reads 10.7× on 129k-token resends without changing speed. The
 cache rounds down to a power-of-two number of 90-byte rows.
 
