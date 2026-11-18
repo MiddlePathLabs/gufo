@@ -787,8 +787,10 @@ public:
       const TextRunnerState& state) const override {
     const auto totals =
         RequireQwenFlashNextState(state).session().NgramRowTotals();
-    return {totals.rows, totals.dedup_rows, totals.cache_hits,
-            totals.disk_reads};
+    return {
+        totals.rows,       totals.dedup_rows,
+        totals.cache_hits, totals.disk_reads,
+        totals.disk_bytes, static_cast<double>(totals.gather_wait_ns) / 1e6};
   }
 
 private:

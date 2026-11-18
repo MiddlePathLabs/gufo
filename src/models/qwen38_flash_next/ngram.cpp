@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <bit>
 #include <cerrno>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <gufo/ext/experimental/ggml_dequant.hpp>
 #include <gufo/ext/platform/fs.hpp>
@@ -27,7 +29,6 @@ constexpr std::size_t kPage = 4096;
 constexpr std::size_t kWorkers = 128;
 constexpr std::size_t kReadBatch = 8;
 constexpr std::size_t kBatchJobs = 1024;
-constexpr std::size_t kCacheBytes = 128 * 1024 * 1024;
 
 #if defined(__GNUC__) && defined(__x86_64__)
 // bf16 -> f32 is a 16-bit shift of the raw bits, so the widening needs no
@@ -115,6 +116,23 @@ NgramTable::~NgramTable() {
   }
 }
 
+std::size_t NgramTable::CacheBudget(const char* value) noexcept {
+  // Digits only: strtoull alone would skip spaces and wrap a minus sign.
+  if (value == nullptr || *value < '0' || *value > '9') {
+    return kDefaultCacheBytes;
+  }
+  char* end = nullptr;
+  errno = 0;
+  const unsigned long long parsed = std::strtoull(value, &end, 10);
+  if (*end != '\0') {
+    return kDefaultCacheBytes;
+  }
+  if (errno == ERANGE || parsed > kMaxCacheBytes) {
+    return kMaxCacheBytes;
+  }
+  return static_cast<std::size_t>(parsed);
+}
+
 std::unique_ptr<NgramTable> NgramTable::Open(
     platform::PlatformFile file, std::uint64_t file_offset, std::uint64_t rows,
     std::uint32_t row_dim, core::GgmlType type, std::string* error_msg) {
@@ -135,7 +153,9 @@ std::unique_ptr<NgramTable> NgramTable::Open(
   t->type_ = type;
   t->row_dim_ = row_dim;
   t->row_bytes_ = row_dim / block * block_bytes;
-  t->cache_count_ = std::bit_floor(kCacheBytes / t->row_bytes_);
+  const char* budget_env = std::getenv("GUFO_NGRAM_CACHE_BYTES");
+  const std::size_t budget = CacheBudget(budget_env);
+  t->cache_count_ = std::bit_floor(budget / t->row_bytes_);
   t->cache_entries_ = std::make_unique<CacheEntry[]>(t->cache_count_);
   t->cache_rows_.resize(t->cache_count_ * t->row_bytes_);
   t->rows_ = rows;
@@ -153,6 +173,13 @@ std::unique_ptr<NgramTable> NgramTable::Open(
       *error_msg = "cannot open bound n-gram table";
     }
     return nullptr;
+  }
+  if (budget_env != nullptr && *budget_env != '\0') {
+    std::fprintf(stderr,
+                 "gufo: n-gram row cache %.1f MiB (%zu rows of %zu bytes)\n",
+                 static_cast<double>(t->cache_count_ * t->row_bytes_) /
+                     (1024.0 * 1024.0),
+                 t->cache_count_, t->row_bytes_);
   }
   for (std::size_t i = 0; i < kWorkers; ++i) {
     t->workers_.emplace_back([raw = t.get()] { raw->Worker(); });
@@ -245,8 +272,10 @@ bool NgramTable::ReadOne(std::uint32_t row, float* dst,
     }
     got += n;
   }
-  if (owner != nullptr)
+  if (owner != nullptr) {
     owner->disk_reads_.fetch_add(1, std::memory_order_relaxed);
+    owner->disk_bytes_.fetch_add(length, std::memory_order_relaxed);
+  }
   // Cache only a complete row, still in its original quantized format.
   // A busy slot is skipped; readers never wait for another row's I/O.
   if (entry != nullptr &&

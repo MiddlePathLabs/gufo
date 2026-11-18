@@ -44,6 +44,10 @@ struct NgramTotals {
   std::uint64_t dedup_rows{0};
   std::uint64_t cache_hits{0};
   std::uint64_t disk_reads{0};
+  /// Bytes the disk reads transferred, including direct-I/O page alignment.
+  std::uint64_t disk_bytes{0};
+  /// Time the executor spent blocked waiting for this sequence's gathers.
+  std::uint64_t gather_wait_ns{0};
 };
 
 /// Per-sequence counters. Gathers and table readers update them concurrently.
@@ -53,7 +57,14 @@ public:
     return {rows_.load(std::memory_order_relaxed),
             dedup_rows_.load(std::memory_order_relaxed),
             cache_hits_.load(std::memory_order_relaxed),
-            disk_reads_.load(std::memory_order_relaxed)};
+            disk_reads_.load(std::memory_order_relaxed),
+            disk_bytes_.load(std::memory_order_relaxed),
+            gather_wait_ns_.load(std::memory_order_relaxed)};
+  }
+
+  /// Records executor time spent blocked on this sequence's gathers.
+  void AddGatherWait(std::uint64_t ns) noexcept {
+    gather_wait_ns_.fetch_add(ns, std::memory_order_relaxed);
   }
 
 private:
@@ -62,6 +73,8 @@ private:
   std::atomic<std::uint64_t> dedup_rows_{0};
   std::atomic<std::uint64_t> cache_hits_{0};
   std::atomic<std::uint64_t> disk_reads_{0};
+  std::atomic<std::uint64_t> disk_bytes_{0};
+  std::atomic<std::uint64_t> gather_wait_ns_{0};
 };
 
 /// The next `rows` rows of a gather belong to the sequence counted by
@@ -74,6 +87,11 @@ struct NgramGatherOwner {
 /// Reads n-gram embedding rows from the GGUF shard with direct I/O and a
 /// bounded cache of compressed rows. The table stays out of the page cache.
 /// Rows are dequantized to F32 and laid out [token][head][ple_head_dim].
+///
+/// The row cache is direct-mapped with a power-of-two entry count, so it
+/// holds bit_floor(budget / row_bytes) rows: the default 128 MiB budget
+/// keeps 90 MiB of 90-byte IQ4_NL rows. `GUFO_NGRAM_CACHE_BYTES` overrides
+/// the budget.
 class NgramTable {
 public:
   ~NgramTable();
@@ -87,6 +105,13 @@ public:
       platform::PlatformFile file, std::uint64_t file_offset,
       std::uint64_t rows, std::uint32_t row_dim, core::GgmlType type,
       std::string* error_msg = nullptr);
+
+  static constexpr std::size_t kDefaultCacheBytes = 128 * 1024 * 1024;
+  static constexpr std::size_t kMaxCacheBytes = std::size_t{8} << 30;
+  /// Row-cache budget from a `GUFO_NGRAM_CACHE_BYTES` value. Null, empty or
+  /// unparsable values keep the default; larger values clamp to 8 GiB and
+  /// zero disables the cache.
+  [[nodiscard]] static std::size_t CacheBudget(const char* value) noexcept;
 
   /// Gathers `rows.size()` rows into `out` (rows.size() * row_dim floats).
   /// Duplicate ids are read once. Returns false on any failed read.
@@ -108,6 +133,8 @@ public:
   [[nodiscard]] std::uint32_t RowDim() const noexcept { return row_dim_; }
   [[nodiscard]] std::uint64_t Rows() const noexcept { return rows_; }
   [[nodiscard]] std::size_t RowBytes() const noexcept { return row_bytes_; }
+  /// Rows the row cache can hold.
+  [[nodiscard]] std::size_t CacheRows() const noexcept { return cache_count_; }
 
 private:
   NgramTable() = default;
