@@ -44,9 +44,11 @@ struct NgramTotals {
   std::uint64_t dedup_rows{0};
   std::uint64_t cache_hits{0};
   std::uint64_t disk_reads{0};
-  /// Bytes the disk reads transferred, including direct-I/O page alignment.
+  /// Bytes the disk reads returned, including direct-I/O page alignment.
   std::uint64_t disk_bytes{0};
-  /// Time the executor spent blocked waiting for this sequence's gathers.
+  /// Time this sequence's execution waited for n-gram gathers to complete,
+  /// including duplicate-row copies and another sequence's prefetch that
+  /// had to finish first; not SSD time alone.
   std::uint64_t gather_wait_ns{0};
 };
 
@@ -62,7 +64,7 @@ public:
             gather_wait_ns_.load(std::memory_order_relaxed)};
   }
 
-  /// Records executor time spent blocked on this sequence's gathers.
+  /// Records time this sequence's execution waited for gathers to complete.
   void AddGatherWait(std::uint64_t ns) noexcept {
     gather_wait_ns_.fetch_add(ns, std::memory_order_relaxed);
   }

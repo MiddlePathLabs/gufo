@@ -2429,8 +2429,9 @@ const float* InjectWeights(const DeviceMixer& m) {
                                                               : nullptr;
 }
 
-/// Charges the enclosing scope's wall time to a sequence's n-gram gather
-/// wait, so request metrics show how long execution blocked on table reads.
+/// Charges the enclosing scope's wall time to the waiting sequence's n-gram
+/// gather wait. A prefetch in flight may belong to another sequence; the
+/// time still counts here, since this sequence is the one held up.
 class GatherWaitTimer {
 public:
   explicit GatherWaitTimer(NgramCounters& counters) noexcept

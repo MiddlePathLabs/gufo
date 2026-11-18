@@ -15,6 +15,7 @@
 #include <system_error>
 #include <vector>
 
+#include "src/core/platform/env.hpp"
 #include "src/core/platform/fs.hpp"
 #include "src/models/qwen38_flash_next/ngram_remainder.hpp"
 #include "tests/support/temporary_directory.hpp"
@@ -673,6 +674,60 @@ void TestCacheBudget() {
             "default budget holds 2^20 rows (90 MiB) of 90-byte rows");
   }
 }
+
+// GUFO_NGRAM_CACHE_BYTES=0 opens a table with no row cache: every unique row
+// reads from disk on every gather, and the rows match a cached table's.
+void TestCacheDisabled() {
+  const char* previous = std::getenv("GUFO_NGRAM_CACHE_BYTES");
+  const std::string saved = previous != nullptr ? previous : "";
+  TemporaryDirectory temp("qwen38-ngram-nocache");
+  const auto path = temp.path() / "bf16.bin";
+  constexpr std::uint32_t dim = 4;
+  constexpr std::uint32_t rows = 64;
+  {
+    std::ofstream out(path, std::ios::binary);
+    for (std::uint32_t i = 0; i < rows * dim * 2; ++i) {
+      const auto byte = static_cast<char>((i * 37 + 11) & 0xFF);
+      out.write(&byte, 1);
+    }
+  }
+  std::string error;
+  Check(gufo::platform::SetEnv("GUFO_NGRAM_CACHE_BYTES", "0"),
+        "cache budget can be set");
+  auto uncached =
+      OpenTable(path, 0, rows, dim, gufo::core::GgmlType::kBF16, &error);
+  if (previous != nullptr)
+    gufo::platform::SetEnv("GUFO_NGRAM_CACHE_BYTES", saved);
+  else
+    gufo::platform::UnsetEnv("GUFO_NGRAM_CACHE_BYTES");
+  Check(uncached != nullptr, error.c_str());
+  if (!uncached)
+    return;
+  Check(uncached->CacheRows() == 0, "zero budget leaves no row cache");
+  auto cached =
+      OpenTable(path, 0, rows, dim, gufo::core::GgmlType::kBF16, &error);
+  Check(cached != nullptr, error.c_str());
+  if (!cached)
+    return;
+
+  const std::vector<std::uint32_t> ids{3, 7, 3, 63, 0, 7};
+  std::vector<float> expected(ids.size() * dim), out(ids.size() * dim);
+  Check(cached->Read(ids, expected), "cached table reads");
+  q::NgramCounters counters;
+  const std::array owner{q::NgramGatherOwner{ids.size(), &counters}};
+  for (int pass = 0; pass < 2; ++pass) {
+    std::fill(out.begin(), out.end(), -1.0f);
+    Check(uncached->StartRead(ids, out, owner) && uncached->WaitRead(),
+          "uncached gather completes");
+    Check(std::memcmp(out.data(), expected.data(),
+                      out.size() * sizeof(float)) == 0,
+          "uncached rows match the cached table");
+  }
+  const auto t = counters.Load();
+  Check(t.rows == 12 && t.dedup_rows == 4 && t.cache_hits == 0 &&
+            t.disk_reads == 8,
+        "without a cache every unique row reads from disk each pass");
+}
 }  // namespace
 
 int main() {
@@ -686,6 +741,7 @@ int main() {
   TestDistantRows();
   TestCounters();
   TestCacheBudget();
+  TestCacheDisabled();
   if (failures != 0) {
     std::fprintf(stderr, "%d failures\n", failures);
     return 1;

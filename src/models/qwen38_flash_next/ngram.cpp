@@ -274,7 +274,7 @@ bool NgramTable::ReadOne(std::uint32_t row, float* dst,
   }
   if (owner != nullptr) {
     owner->disk_reads_.fetch_add(1, std::memory_order_relaxed);
-    owner->disk_bytes_.fetch_add(length, std::memory_order_relaxed);
+    owner->disk_bytes_.fetch_add(got, std::memory_order_relaxed);
   }
   // Cache only a complete row, still in its original quantized format.
   // A busy slot is skipped; readers never wait for another row's I/O.

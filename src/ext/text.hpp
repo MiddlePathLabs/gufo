@@ -241,9 +241,10 @@ struct TextRunnerNgramRows {
   std::uint64_t dedup_rows{0};
   std::uint64_t cache_hits{0};
   std::uint64_t disk_reads{0};
-  /// Bytes the disk reads transferred, including alignment padding.
+  /// Bytes the disk reads returned, including alignment padding.
   std::uint64_t disk_bytes{0};
-  /// Time execution spent blocked waiting for this sequence's gathers.
+  /// Time this sequence's execution waited for n-gram gathers to complete,
+  /// including row copies and any other sequence's read it had to finish.
   double gather_wait_ms{0};
 };
 
