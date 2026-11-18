@@ -192,7 +192,9 @@ inline std::string GenerationLogDetails(
     out << " ngram_rows=" << result.ngram_rows
         << " ngram_dedup_rows=" << result.ngram_dedup_rows
         << " ngram_cache_hits=" << result.ngram_cache_hits
-        << " ngram_disk_reads=" << result.ngram_disk_reads;
+        << " ngram_disk_reads=" << result.ngram_disk_reads
+        << " ngram_disk_bytes=" << result.ngram_disk_bytes
+        << " ngram_wait_ms=" << result.ngram_gather_wait_ms;
   if (result.cache_snapshot_bytes > 0)
     out << " cache_snapshot_bytes=" << result.cache_snapshot_bytes;
   if (result.cache_disk_queued_bytes > 0)

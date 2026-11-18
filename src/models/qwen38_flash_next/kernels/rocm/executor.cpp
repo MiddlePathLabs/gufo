@@ -2625,6 +2625,26 @@ const float* InjectWeights(const DeviceMixer& m) {
                                                               : nullptr;
 }
 
+/// Charges the enclosing scope's wall time to a sequence's n-gram gather
+/// wait, so request metrics show how long execution blocked on table reads.
+class GatherWaitTimer {
+public:
+  explicit GatherWaitTimer(NgramCounters& counters) noexcept
+      : counters_(counters), start_(std::chrono::steady_clock::now()) {}
+  GatherWaitTimer(const GatherWaitTimer&) = delete;
+  GatherWaitTimer& operator=(const GatherWaitTimer&) = delete;
+  ~GatherWaitTimer() {
+    counters_.AddGatherWait(static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - start_)
+            .count()));
+  }
+
+private:
+  NgramCounters& counters_;
+  std::chrono::steady_clock::time_point start_;
+};
+
 }  // namespace
 
 bool Executor::FusedMixer(const DeviceMixer& m, std::uint32_t n_tokens) const {
@@ -2945,8 +2965,11 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
 
 bool Executor::PleFetch(Session& session, std::span<const std::int32_t> tokens,
                         bool speculative, std::string* error_msg) const {
-  if (ple_pending_ && !WaitPle(error_msg)) {
-    return false;
+  if (ple_pending_) {
+    const GatherWaitTimer wait(session.ngram_counters_);
+    if (!WaitPle(error_msg)) {
+      return false;
+    }
   }
   const Config& c = config();
   const auto n = static_cast<std::uint32_t>(tokens.size());
@@ -2976,7 +2999,10 @@ bool Executor::PleFetch(Session& session, std::span<const std::int32_t> tokens,
       }
       // Only one table read runs at a time: finish the prefetch, which had a
       // whole chunk to complete, then read the rows past it.
-      FinishPrefetch();
+      {
+        const GatherWaitTimer wait(session.ngram_counters_);
+        FinishPrefetch();
+      }
       const auto rest = tokens.subspan(shared);
       const auto rows = rest.size() * c.ple_heads;
       HashNgramRows(c, session.ngram_, rest,
@@ -2996,7 +3022,10 @@ bool Executor::PleFetch(Session& session, std::span<const std::int32_t> tokens,
       return prefetch_.tail;
     }
   }
-  FinishPrefetch();
+  {
+    const GatherWaitTimer wait(session.ngram_counters_);
+    FinishPrefetch();
+  }
   // Only proper prefixes need snapshots; the full batch keeps its live state.
   if (speculative) {
     for (std::uint32_t i = 0; i < n; ++i) {
@@ -3085,8 +3114,11 @@ bool Executor::Ple(const DeviceLayer& l, Session& session, std::uint32_t n,
                    bool embeddings_ready,
                    std::span<PrefillCheckpoint* const> checkpoints) const {
   const Config& c = config();
-  if (!embeddings_ready && !WaitPle(error_msg)) {
-    return false;
+  if (!embeddings_ready) {
+    const GatherWaitTimer wait(session.ngram_counters_);
+    if (!WaitPle(error_msg)) {
+      return false;
+    }
   }
   if (!embeddings_ready && !prefetch_next_.empty()) {
     // A decode between layer groups first finishes the table read in
@@ -4212,8 +4244,11 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   };
   // The prefix is already queued. Wait once before the suffix so recording
   // its graph can reuse these pinned rows while the eager pass executes.
-  if (graph && ple_pending_ && !WaitPle(error_msg)) {
-    return false;
+  if (graph && ple_pending_) {
+    const GatherWaitTimer wait(session.ngram_counters_);
+    if (!WaitPle(error_msg)) {
+      return false;
+    }
   }
   if (!Run(session, key, graph, body, error_msg)) {
     return false;
