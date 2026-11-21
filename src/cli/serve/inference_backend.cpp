@@ -395,8 +395,8 @@ bool InferenceBackend::load(const std::string&, std::string* error,
                             const TextSpeculativeConfig&,
                             const TextDiskCacheConfig&, const std::string&,
                             TextRunnerRamCacheOptions, bool, const std::string&,
-                            const std::string&,
-                            const PrepareRunnerOptions&, const LoadProgress&) {
+                            const std::string&, const PrepareRunnerOptions&,
+                            const LoadProgress&) {
   SetError(error, "HIP engine is disabled");
   return false;
 }

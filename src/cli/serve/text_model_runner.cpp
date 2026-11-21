@@ -1949,8 +1949,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     const CancellationCheck& is_cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse_prompt,
     std::size_t cache_prefix_tokens, bool stop_at_eos, bool persist,
-    StateTicket* state, const RestoreCopyRunner& run_copies,
-    bool projection) {
+    StateTicket* state, const RestoreCopyRunner& run_copies, bool projection) {
   sampling_config.Validate();
   if (prompt.empty()) {
     throw std::invalid_argument("text runner prompt must not be empty");
