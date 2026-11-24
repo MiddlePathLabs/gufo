@@ -125,6 +125,19 @@ std::uint64_t RetentionPolicy::ConversationOf(CheckpointId id) const {
   return i == limit_ ? 0 : conversations_[i];
 }
 
+std::uint64_t RetentionPolicy::ContinuationOf(CheckpointId id) const {
+  const auto i = Find(id);
+  if (i == limit_ || !conversations_[i])
+    return 0;
+  const auto conversation = conversations_[i];
+  const auto boundary = records_[i].checkpoint->Boundary();
+  for (std::size_t j = 0; j < limit_; ++j)
+    if (j != i && records_[j].checkpoint && conversations_[j] == conversation &&
+        records_[j].checkpoint->Boundary() > boundary)
+      return 0;
+  return conversation;
+}
+
 bool RetentionPolicy::Pin(CheckpointId id) {
   const auto i = Find(id);
   if (i == limit_ || !records_[i].checkpoint)

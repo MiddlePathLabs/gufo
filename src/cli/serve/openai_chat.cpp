@@ -959,10 +959,14 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     if (const auto* ttl = body.find("cache_keep_ttl");
         ttl != nullptr && !ttl->is_null()) {
       const double seconds = ttl->is_number() ? ttl->as_double() : 0.0;
+      const double max_seconds = static_cast<double>(
+          cache::CheckpointHandles::kMaxTtl.count());
       if (!ttl->is_number() || !std::isfinite(seconds) || seconds < 1 ||
-          seconds > 604800) {
+          seconds > max_seconds) {
         return Error(400, "Bad Request",
-                     "'cache_keep_ttl' must be 1-604800 seconds",
+                     "'cache_keep_ttl' must be 1-" +
+                         std::to_string(cache::CheckpointHandles::kMaxTtl.count()) +
+                         " seconds",
                      "invalid_cache_keep_ttl");
       }
       output->chat.cache_keep_ttl = std::chrono::milliseconds(

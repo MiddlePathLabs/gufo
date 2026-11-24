@@ -22,6 +22,9 @@ public:
   using Clock = std::chrono::steady_clock;
   static constexpr std::size_t kDefaultCapacity = 64;
   static constexpr std::chrono::seconds kDefaultTtl{3600};
+  /// Longest TTL a client may ask for. A handle pins RAM against every
+  /// other request, so an abandoned one must not outlive a working day.
+  static constexpr std::chrono::seconds kMaxTtl{86400};
   static constexpr std::size_t kMaxNameBytes = 64;
 
   struct Entry {
