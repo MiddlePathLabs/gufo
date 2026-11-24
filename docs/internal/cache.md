@@ -278,8 +278,11 @@ used. The server identifies related checkpoints by exact token prefixes and
 matching input identities, not a client-supplied conversation ID.
 
 Known serving conversations are grouped without a client ID: a request that
-continues a live frontier or restores a checkpoint keeps that conversation's
-number, and a cold assignment starts a new one. Each known conversation may
+continues a live frontier, or restores the deepest RAM record of a
+conversation, keeps that conversation's number; any other assignment starts a
+new one. Restoring a shallower record (a system prompt shared by several
+agents, or an earlier turn) starts a new conversation, so agents that share a
+prefix never share a quota. Each known conversation may
 retain at most 16 records (an eighth of the table). Extra records of the same
 conversation are dropped oldest-first after publication, so a long tool
 session cannot fill the table and evict every peer's last checkpoint. Pinned
@@ -291,7 +294,8 @@ several. Records admitted without a conversation number (direct cache users
 and tests) keep the historical prefix-relation policy.
 
 Conversation numbers live in the RAM retention table, not in a checkpoint or
-disk manifest. A RAM restore keeps the number; a disk restore after a restart
+disk manifest. A RAM restore of a conversation's deepest record keeps the
+number; a disk restore after a restart
 starts a new number on its next publication. This is a limit, not a hidden
 guarantee: the 16-record quota applies to the new number's RAM records, while
 the old conversation's durable entries remain governed by the disk tier's
@@ -308,13 +312,13 @@ ID only: it adds no payload and creates no checkpoint. Pins are
 reference-counted in `RetentionPolicy`, so eviction skips a record until its
 last handle expires or is dropped, and two names on one checkpoint add one
 pin count each without duplicating payload. The registry holds
-`kHandleCapacity` (64) names and evicts the earliest expiry when full.
+`CheckpointHandles::kDefaultCapacity` (64) names and evicts the earliest
+expiry when full. TTLs run from 1 second to `kMaxTtl` (one day).
 
-Pinned payload is bounded. The first handle may pin a checkpoint up to the
-RAM cache budget, so a deep conversation is always keepable; a later pin is
-admitted only while the total stays within the larger of that first checkpoint
-and half the budget, and is refused with `X-Gufo-Cache-Handle-Error`
-otherwise. A second name for the checkpoint already pinned adds no bytes.
+Pinned payload is bounded: all handles together may pin at most half the RAM
+cache budget, so ordinary retention always keeps the other half. A pin that
+would pass the bound is refused with `X-Gufo-Cache-Handle-Error`. A second
+name for a checkpoint that is already pinned adds no bytes.
 
 `GET /v1/cache/handles` reports names, boundaries, remaining TTL and the
 pinned/budget totals; `POST /v1/cache/handles/release` drops one name and
