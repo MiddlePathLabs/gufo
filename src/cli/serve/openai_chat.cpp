@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "gufo/ext/text.hpp"
+#include "src/cache/handles.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/quote_tracker.hpp"
 #include "src/cli/serve/response_format.hpp"
@@ -944,6 +945,39 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
                    "invalid_cache_persist");
     }
     output->chat.cache_persist = cache_persist->as_bool();
+  }
+  if (const auto* keep = body.find("cache_keep");
+      keep != nullptr && !keep->is_null()) {
+    if (!keep->is_string() ||
+        !cache::CheckpointHandles::ValidName(keep->str())) {
+      return Error(400, "Bad Request",
+                   "'cache_keep' must be a 1-64 character printable name",
+                   "invalid_cache_keep");
+    }
+    output->chat.cache_keep = keep->str();
+    output->chat.cache_keep_ttl = cache::CheckpointHandles::kDefaultTtl;
+    if (const auto* ttl = body.find("cache_keep_ttl");
+        ttl != nullptr && !ttl->is_null()) {
+      const double seconds = ttl->is_number() ? ttl->as_double() : 0.0;
+      if (!ttl->is_number() || !std::isfinite(seconds) || seconds < 1 ||
+          seconds > 604800) {
+        return Error(400, "Bad Request",
+                     "'cache_keep_ttl' must be 1-604800 seconds",
+                     "invalid_cache_keep_ttl");
+      }
+      output->chat.cache_keep_ttl = std::chrono::milliseconds(
+          static_cast<std::int64_t>(seconds * 1000));
+    }
+  }
+  if (const auto* from = body.find("cache_from");
+      from != nullptr && !from->is_null()) {
+    if (!from->is_string() ||
+        !cache::CheckpointHandles::ValidName(from->str())) {
+      return Error(400, "Bad Request",
+                   "'cache_from' must be a 1-64 character printable name",
+                   "invalid_cache_from");
+    }
+    output->chat.cache_from = from->str();
   }
   if (const auto error =
           ParseStopSequences(body.find("stop"), StopSequenceFormat::kOpenAi,
@@ -2283,6 +2317,10 @@ json::Value Usage(const TextGenerationBackend::Result& result) {
   metrics["cache_snapshot_ms"] = result.cache_snapshot_ms;
   metrics["cache_disk_enqueue_ms"] = result.cache_disk_enqueue_ms;
   metrics["cache_disk_hit"] = result.cache_disk_hit;
+  if (!result.cache_from_status.empty())
+    metrics["cache_from_status"] = result.cache_from_status;
+  if (!result.cache_handle_scope.empty())
+    metrics["cache_handle_scope"] = result.cache_handle_scope;
   metrics["draft_rounds"] = result.draft_rounds;
   metrics["prefill_tokens"] = result.prefill_tokens;
   metrics["prefill_chunks"] = result.prefill_chunks;
@@ -3137,11 +3175,18 @@ HttpResponse NonStreamingResponse(
          << ", inter_token;dur=" << result.mean_inter_token_ms
          << ", max_inter_token;dur=" << result.max_inter_token_ms;
 
+  std::vector<std::pair<std::string, std::string>> headers{
+      {"Server-Timing", timing.str()}};
+  if (!result.cache_handle.empty())
+    headers.emplace_back("X-Gufo-Cache-Handle", result.cache_handle);
+  if (!result.cache_handle_error.empty())
+    headers.emplace_back("X-Gufo-Cache-Handle-Error",
+                         result.cache_handle_error);
   return {
       .status = 200,
       .reason = "OK",
       .body = response.dump(),
-      .headers = {{"Server-Timing", timing.str()}},
+      .headers = std::move(headers),
       .streaming_body = {},
       .log_details = GenerationLogDetails(result),
   };

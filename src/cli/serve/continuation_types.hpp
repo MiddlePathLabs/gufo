@@ -51,6 +51,11 @@ struct ContinuationLookup {
   std::string_view miss_reason;
   std::size_t common_prefix_tokens{0};
   std::size_t checkpoint_tokens{0};
+  /// `cache_from` outcome when a name was supplied: "used", "fallback",
+  /// "missing" (no live handle), "not_prefix" (handle exists but the prompt
+  /// does not extend it) or "failed" (nothing restored). Empty otherwise.
+  /// A non-"used" value names a restore the client did not ask for.
+  std::string_view cache_from_status;
 };
 
 }  // namespace gufo::server

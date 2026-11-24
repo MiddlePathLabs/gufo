@@ -277,6 +277,77 @@ can occupy several records, and the byte budget may bind before all 128 are
 used. The server identifies related checkpoints by exact token prefixes and
 matching input identities, not a client-supplied conversation ID.
 
+Known serving conversations are grouped without a client ID: a request that
+continues a live frontier or restores a checkpoint keeps that conversation's
+number, and a cold assignment starts a new one. Each known conversation may
+retain at most 16 records (an eighth of the table). Extra records of the same
+conversation are dropped oldest-first after publication, so a long tool
+session cannot fill the table and evict every peer's last checkpoint. Pinned
+records are exempt from the quota trim, so an explicit handle can keep a
+conversation above it. Under record pressure, an over-quota conversation's
+records are victims first; a
+peer's only record is a last resort while another conversation still holds
+several. Records admitted without a conversation number (direct cache users
+and tests) keep the historical prefix-relation policy.
+
+Conversation numbers live in the RAM retention table, not in a checkpoint or
+disk manifest. A RAM restore keeps the number; a disk restore after a restart
+starts a new number on its next publication. This is a limit, not a hidden
+guarantee: the 16-record quota applies to the new number's RAM records, while
+the old conversation's durable entries remain governed by the disk tier's
+lineage-aware global LRU. A restored conversation can therefore occupy up to
+16 old plus 16 new disk records; the disk byte budget, not the RAM quota,
+bounds that total.
+
+## Named handles
+
+`ComponentTextCache::KeepHandle` pins a resident checkpoint under a name and
+`ResolveHandle` returns it after TTL expiry checks; `DropHandle`, `Handles`,
+`HandleInfos` and `HandleBytes` complete the API. A handle stores a checkpoint
+ID only: it adds no payload and creates no checkpoint. Pins are
+reference-counted in `RetentionPolicy`, so eviction skips a record until its
+last handle expires or is dropped, and two names on one checkpoint add one
+pin count each without duplicating payload. The registry holds
+`kHandleCapacity` (64) names and evicts the earliest expiry when full.
+
+Pinned payload is bounded. The first handle may pin a checkpoint up to the
+RAM cache budget, so a deep conversation is always keepable; a later pin is
+admitted only while the total stays within the larger of that first checkpoint
+and half the budget, and is refused with `X-Gufo-Cache-Handle-Error`
+otherwise. A second name for the checkpoint already pinned adds no bytes.
+
+`GET /v1/cache/handles` reports names, boundaries, remaining TTL and the
+pinned/budget totals; `POST /v1/cache/handles/release` drops one name and
+unpins it. The registry is process-local: a restart releases every pin, so an
+abandoned handle cannot outlive its server. Its checkpoint may still restore
+from the disk tier, where the usual lineage-aware LRU decides what stays.
+
+`cache_keep` names the **reply-end** checkpoint, generated tokens included.
+When another request is active, the normal frontier capture would move to an
+idle worker after the response and the lease could only report the shallower
+prompt boundary; a keep request captures the frontier on its own lease
+instead. `usage.gufo.cache_handle_scope` says which state was pinned.
+
+The HTTP chat endpoint exposes `cache_keep`, `cache_keep_ttl` and
+`cache_from`. `cache_from` only reorders the ordinary exact-prefix candidates,
+so a stale handle never bypasses prefix or input identity checks. Its outcome
+is always explicit: `usage.gufo.cache_from_status` is `used` when the named
+checkpoint is the restored state, `not_prefix` when the prompt does not extend
+it, `missing` when the name is not live, `fallback` when another candidate
+served the request after the preferred restore failed, and `failed` when
+nothing restored. The server also logs `event=cache_from` with the name,
+status, selected and preferred boundaries.
+
+A compaction probe with a 100,880-token history removed 20,000 tokens from
+the middle. On the first edited prompt the cache restored the last checkpoint
+before the edit (24,576 tokens), prefilled 56,165 of 80,741, and reached first
+token in 34.18 s against 48.24 s with reuse disabled; greedy output was
+byte-identical. Later rounds restored the previous edited prompt's tail
+because only a marker changed. Composable suffix reuse is not enabled: the
+model is hybrid-recurrent, so state after the edit depends on the removed
+tokens and no unchanged suffix can be spliced into it without changing the
+exact-prefix result.
+
 When space is needed, RAM retention prefers removing:
 
 1. A full-prompt retry copy with a stable fallback still retained.
@@ -814,6 +885,7 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | `schema=component-cache-v1 event=staging_exhausted` | `--cache-ram-bytes off`: a disk capture found no room in the capture backing; reports `staged_bytes`, `held_bytes` by other captures, `backing_bytes`, `waited_ms` and whether it was an exact `frontier` |
 | `schema=component-cache-v1 event=row_storage` | At startup: `mode=shared_pages` when checkpoints keep the session pages that hold their rows, `mode=backing` when rows are copied or borrowed |
 | `schema=component-cache-v1 event=acquire` | The reuse a request got: `reuse` (`live`, `ram`, `disk`, `none`), `selected_tokens`, `restored_bytes`, and `remapped_bytes`, the part of them restored by mapping shared pages instead of a copy |
+| `schema=component-cache-v1 event=cache_from` | A request supplied `cache_from`: `name`, `status` (`used`, `fallback`, `not_prefix`, `missing` or `failed`), `selected_tokens` and `preferred_tokens`. `fallback` means another branch served the request; it is never silent |
 | `schema=component-cache-v1 event=in_pass_unsupported` | The adapter could not take a checkpoint at `tokens` inside a prefill pass (`cached_tokens` is the reused prefix); the pass ends there and the checkpoint is captured after it |
 | `schema=component-cache-v1 event=published` | A checkpoint finished disk publication; `checkpoint_id` identifies the capture and `tokens` its boundary |
 | `schema=component-cache-v1 event=disk_restore` | A checkpoint was restored from disk: `tokens`, `bytes`, `pieces` and timings. `filesystem_ms` and `checksum_ms` add up the parallel readers' time, so they can exceed the restore's wall time; `stream_wait_ms` is the restoring thread's wait for copies |

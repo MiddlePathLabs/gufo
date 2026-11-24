@@ -1007,6 +1007,34 @@ TextRunnerPool::Request::PreviewFirstToken() {
       dynamic_cast<TextRunnerState&>(impl_->lease->state()), sampler);
 }
 
+std::optional<cache::CheckpointId>
+TextRunnerPool::Request::RetainedCheckpoint() const {
+  return impl_ ? impl_->lease->RetainedCheckpoint() : std::nullopt;
+}
+
+bool TextRunnerPool::Request::RetainedReplyEnd() const {
+  return impl_ && impl_->lease->RetainedReplyEnd();
+}
+
+bool TextRunnerPool::KeepHandle(std::string_view name,
+                                cache::CheckpointId checkpoint,
+                                std::chrono::milliseconds ttl,
+                                std::string* error) {
+  return impl_->component_cache->KeepHandle(name, checkpoint, ttl, error);
+}
+
+bool TextRunnerPool::DropHandle(std::string_view name) {
+  return impl_->component_cache->DropHandle(name);
+}
+
+std::vector<ComponentTextCache::HandleInfo> TextRunnerPool::HandleInfos() {
+  return impl_->component_cache->HandleInfos();
+}
+
+std::pair<std::size_t, std::size_t> TextRunnerPool::HandleBytes() const {
+  return impl_->component_cache->HandleBytes();
+}
+
 TextRunnerPool::Request::~Request() = default;
 
 TextRunnerPool::Request::Request(Request&&) noexcept = default;
@@ -1579,7 +1607,8 @@ TextDecodeStep TextRunnerPool::Request::DecodeStep(std::size_t max_tokens) {
   return step;
 }
 
-TextRunnerPool::Request::CommitMetrics TextRunnerPool::Request::Commit() {
+TextRunnerPool::Request::CommitMetrics TextRunnerPool::Request::Commit(
+    bool wait_frontier) {
   if (!*this) {
     throw std::logic_error("text runner request is empty");
   }
@@ -1628,7 +1657,9 @@ TextRunnerPool::Request::CommitMetrics TextRunnerPool::Request::Commit() {
   CommitMetrics metrics = impl_->snapshot_metrics;
   metrics.snapshot_bytes += impl_->lease->Commit(
       std::move(impl_->snapshot_tokens), std::move(impl_->prompt_snapshot),
-      std::move(checkpoint));
+      std::move(checkpoint), wait_frontier);
+  metrics.retained_checkpoint = impl_->lease->RetainedCheckpoint();
+  metrics.retained_reply_end = impl_->lease->RetainedReplyEnd();
   metrics.component_cache = component_cache_metrics();
   if (metrics.component_cache) {
     metrics.disk_queued_bytes = metrics.component_cache->disk_queued_bytes;
@@ -1639,7 +1670,7 @@ TextRunnerPool::Request::CommitMetrics TextRunnerPool::Request::Commit() {
 }
 
 TextRunnerPool::Request::CommitMetrics
-TextRunnerPool::Request::Cancel() noexcept {
+TextRunnerPool::Request::Cancel(bool wait_frontier) noexcept {
   if (!*this)
     return {};
   try {
@@ -1688,7 +1719,9 @@ TextRunnerPool::Request::Cancel() noexcept {
     CommitMetrics metrics = impl_->snapshot_metrics;
     metrics.snapshot_bytes += impl_->lease->Commit(
         std::move(impl_->snapshot_tokens), std::move(impl_->prompt_snapshot),
-        std::move(checkpoint));
+        std::move(checkpoint), wait_frontier);
+    metrics.retained_checkpoint = impl_->lease->RetainedCheckpoint();
+    metrics.retained_reply_end = impl_->lease->RetainedReplyEnd();
     metrics.component_cache = component_cache_metrics();
     if (metrics.component_cache) {
       metrics.disk_queued_bytes = metrics.component_cache->disk_queued_bytes;
@@ -1949,7 +1982,8 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     const CancellationCheck& is_cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse_prompt,
     std::size_t cache_prefix_tokens, bool stop_at_eos, bool persist,
-    StateTicket* state, const RestoreCopyRunner& run_copies, bool projection) {
+    StateTicket* state, const RestoreCopyRunner& run_copies, bool projection,
+    std::string_view from_handle) {
   sampling_config.Validate();
   if (prompt.empty()) {
     throw std::invalid_argument("text runner prompt must not be empty");
@@ -1970,7 +2004,8 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     auto lease = impl_->component_cache->Acquire(
         prompt, is_cancelled, context, reuse_prompt, cache_prefix_tokens,
         stop_at_eos, persist, state ? state->tokens : 0,
-        state ? &state->reservation : nullptr, run_copies, projection);
+        state ? &state->reservation : nullptr, run_copies, projection,
+        from_handle);
     if (!lease)
       return {};
     Request request(std::make_unique<Request::Impl>(

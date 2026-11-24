@@ -912,6 +912,211 @@ void PromptTargetBeforeGridKeepsItsPurpose() {
          static_cast<int>(cache::RetentionPurpose::kContinuation));
   assert(purpose(2048) == static_cast<int>(cache::RetentionPurpose::kHistory));
 }
+void HandlesPinRetainedCheckpoints() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3};
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(lease->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(), false,
+                                   SnapshotPurpose::kContinuation, prompt));
+  assert(lease->PublishSnapshot(prompt, lease->Capture(), false));
+  const auto checkpoint = lease->RetainedCheckpoint();
+  assert(checkpoint.has_value());
+  std::string error;
+  assert(cache.KeepHandle("agent-a", *checkpoint, std::chrono::hours(1),
+                          &error));
+  assert(cache.ResolveHandle("agent-a") == checkpoint);
+  assert(!cache.KeepHandle("agent-b", {0}, std::chrono::hours(1), &error));
+  (void)lease->Commit({}, {}, prompt);
+  // A from handle prefers that checkpoint over a deeper one and still
+  // restores the exact prefix.
+  auto reused = cache.Acquire(prompt, {}, {}, true, 0, true, true, 0, nullptr,
+                              {}, false, "agent-a");
+  assert(reused->cache_hit() && reused->cached_tokens() == prompt.size());
+  assert(cache.DropHandle("agent-a"));
+  assert(!cache.ResolveHandle("agent-a"));
+  assert(cache.KeepHandle("short", *checkpoint,
+                          std::chrono::milliseconds(1), &error));
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  assert(!cache.ResolveHandle("short"));
+  // The expired name released its pin; nothing remains pinned.
+  assert(cache.HandleBytes().first == 0);
+}
+// A named keep pins where the reply ended, not the shallower prompt boundary,
+// even when another request could have moved the frontier capture to a worker.
+void ReplyEndKeepCapturesFrontier() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3, 4};
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(lease->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(), false,
+                                   SnapshotPurpose::kContinuation, prompt));
+  auto snapshot = lease->Capture();
+  assert(snapshot);
+  auto frontier = prompt;
+  frontier.push_back(7);
+  const auto tail = std::span(frontier).subspan(prompt.size());
+  runner->adapter->Append(state.slot, tail, tail);
+  auto* peer = cache.Acquire(prompt, {}, {}, true, 0, true).release();
+  // The peer holds the other session, so the frontier capture would normally
+  // move to the idle worker.
+  (void)lease->Commit(prompt, std::move(snapshot), frontier, true);
+  assert(lease->RetainedReplyEnd());
+  const auto checkpoint = lease->RetainedCheckpoint();
+  assert(checkpoint.has_value());
+  std::string error;
+  assert(cache.KeepHandle("reply-end", *checkpoint, std::chrono::hours(1),
+                          &error));
+  auto handles = cache.HandleInfos();
+  assert(handles.size() == 1);
+  assert(handles[0].name == "reply-end");
+  assert(handles[0].tokens == frontier.size());
+  delete peer;
+}
+
+// Two names may pin one checkpoint. The byte counter follows the record once,
+// and releasing one name leaves the other pin in place.
+void HandlesShareOnePinnedRecord() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{5, 6, 7};
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(lease->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(), false,
+                                   SnapshotPurpose::kContinuation, prompt));
+  assert(lease->PublishSnapshot(prompt, lease->Capture(), false));
+  const auto checkpoint = lease->RetainedCheckpoint();
+  assert(checkpoint.has_value());
+  std::string error;
+  assert(cache.KeepHandle("one", *checkpoint, std::chrono::hours(1), &error));
+  assert(cache.KeepHandle("two", *checkpoint, std::chrono::hours(1), &error));
+  auto handles = cache.HandleInfos();
+  assert(handles.size() == 2);
+  const auto bytes = cache.HandleBytes();
+  assert(bytes.first != 0 && bytes.second >= bytes.first);
+  assert(cache.DropHandle("one"));
+  assert(!cache.DropHandle("missing"));
+  assert(cache.HandleInfos().size() == 1);
+  assert(cache.HandleBytes().first == bytes.first);
+  assert(cache.DropHandle("two"));
+  assert(cache.HandleBytes().first == 0);
+  (void)lease->Commit({}, {}, prompt);
+}
+
+// cache_from never claims it used the named branch when the prompt does not
+// extend it; the outcome is reported instead of silently taking another one.
+void CacheFromReportsOutcome() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3};
+  {
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    runner->adapter->Append(state.slot, prompt, prompt);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(),
+                                     false, SnapshotPurpose::kContinuation,
+                                     prompt));
+    assert(lease->PublishSnapshot(prompt, lease->Capture(), false));
+    const auto checkpoint = lease->RetainedCheckpoint();
+    assert(checkpoint.has_value());
+    std::string error;
+    assert(cache.KeepHandle("base", *checkpoint, std::chrono::hours(1),
+                            &error));
+    (void)lease->Commit({}, {}, prompt);
+  }
+  auto used = cache.Acquire(prompt, {}, {}, true, 0, true, true, 0, nullptr, {},
+                            false, "base");
+  assert(used->cache_hit());
+  assert(used->lookup().cache_from_status == "used");
+  used->Invalidate();
+  const std::vector<TextRunnerToken> other{1, 2, 9};
+  auto diverged = cache.Acquire(other, {}, {}, true, 0, true, true, 0, nullptr,
+                                {}, false, "base");
+  assert(diverged->lookup().cache_from_status == "not_prefix");
+  diverged->Invalidate();
+  auto missing = cache.Acquire(prompt, {}, {}, true, 0, true, true, 0, nullptr,
+                               {}, false, "absent");
+  assert(missing->lookup().cache_from_status == "missing");
+  missing->Invalidate();
+}
+
+// A second pin is refused once the first one owns more than the shared half
+// of an explicit handle budget; the first stays usable.
+void HandleByteBudgetRefusesSecondPin() {
+  auto runner = std::make_shared<Runner>();
+  constexpr std::size_t kHandleBytes = 128;
+  ComponentTextCache cache(runner, 2, 1 << 22, {}, false, 0, true, {},
+                           kHandleBytes);
+  const auto publish = [&](const std::vector<TextRunnerToken>& prompt) {
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    runner->adapter->Append(state.slot, prompt, prompt);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(),
+                                     false, SnapshotPurpose::kContinuation,
+                                     prompt));
+    assert(lease->PublishSnapshot(prompt, lease->Capture(), false));
+    const auto checkpoint = lease->RetainedCheckpoint();
+    assert(checkpoint.has_value());
+    (void)lease->Commit({}, {}, prompt);
+    return *checkpoint;
+  };
+  const std::vector<TextRunnerToken> first{1, 2, 3};
+  const auto a = publish(first);
+  const std::vector<TextRunnerToken> second{9, 8, 7};
+  const auto b = publish(second);
+  std::string error;
+  assert(cache.KeepHandle("a", a, std::chrono::hours(1), &error));
+  const auto bytes = cache.HandleBytes();
+  assert(bytes.second == kHandleBytes);
+  assert(bytes.first > kHandleBytes / 2);
+  assert(!cache.KeepHandle("b", b, std::chrono::hours(1), &error));
+  assert(error.find("byte budget") != std::string::npos);
+  assert(cache.HandleInfos().size() == 1);
+  assert(cache.HandleBytes().first == bytes.first);
+}
+
+// Keep, list and release are serialized with eviction and with each other.
+void ConcurrentHandleChurn() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3, 4, 5};
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(lease->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(), false,
+                                   SnapshotPurpose::kContinuation, prompt));
+  assert(lease->PublishSnapshot(prompt, lease->Capture(), false));
+  const auto checkpoint = lease->RetainedCheckpoint();
+  assert(checkpoint.has_value());
+  std::atomic<bool> failed{false};
+  const auto churn = [&](const char* prefix) {
+    for (int index = 0; index < 200; ++index) {
+      const auto name = std::string(prefix) + std::to_string(index);
+      std::string error;
+      if (!cache.KeepHandle(name, *checkpoint, std::chrono::hours(1), &error))
+        failed = true;
+      if (index % 3 == 0 && !cache.DropHandle(name))
+        failed = true;
+      (void)cache.HandleInfos();
+      (void)cache.HandleBytes();
+    }
+  };
+  std::thread one(churn, "one-");
+  std::thread two(churn, "two-");
+  one.join();
+  two.join();
+  assert(!failed.load());
+  for (const auto& handle : cache.HandleInfos())
+    (void)cache.DropHandle(handle.name);
+  assert(cache.HandleBytes().first == 0);
+  (void)lease->Commit({}, {}, prompt);
+}
+
 void ColdAcquireResetsOnce() {
   auto runner = std::make_shared<Runner>();
   ComponentTextCache cache(runner, 1, 1 << 22, {});
@@ -4932,6 +5137,12 @@ int main() {
   HostPressureReleasesRamCache();
   PersistedGridServesAnotherQuestionAfterRestart();
   PromptTargetBeforeGridKeepsItsPurpose();
+  HandlesPinRetainedCheckpoints();
+  ReplyEndKeepCapturesFrontier();
+  HandlesShareOnePinnedRecord();
+  CacheFromReportsOutcome();
+  HandleByteBudgetRefusesSecondPin();
+  ConcurrentHandleChurn();
   ColdAcquireResetsOnce();
   ColdAssignmentAvoidsDrainingCancelledSlot();
   ColdAssignmentAvoidsDrainingCancelledSlot(true);

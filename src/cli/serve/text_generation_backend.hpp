@@ -255,6 +255,14 @@ public:
     double prefill_ms{0.0};
     double decode_ms{0.0};
     std::string client_id{"anonymous"};
+    /// Named keep handle created for this request, empty when none was asked
+    /// for or no checkpoint was retained.
+    std::string cache_handle;
+    std::string cache_handle_error;
+    /// "reply-end" or "prompt-boundary": what cache_handle pinned.
+    std::string cache_handle_scope;
+    /// `cache_from` outcome: used, fallback, missing, not_prefix or failed.
+    std::string cache_from_status;
     std::string execution_plan{"serial-c1"};
     std::string prefill_fallback_reason;
     std::string cache_miss_reason;
@@ -339,6 +347,26 @@ public:
   [[nodiscard]] virtual std::vector<SessionState> session_states() const {
     return {};
   }
+
+  /// One named cache handle, as the release/list endpoint reports it.
+  struct CacheHandle {
+    std::string name;
+    std::uint64_t checkpoint{0};
+    std::size_t tokens{0};
+    std::int64_t ttl_ms{0};
+  };
+  /// Named handles and the payload bytes they pin. Backends without a named
+  /// checkpoint cache return none and leave both byte counts zero.
+  [[nodiscard]] virtual std::vector<CacheHandle> cache_handles(
+      std::size_t* pinned_bytes = nullptr,
+      std::size_t* budget_bytes = nullptr) const {
+    if (pinned_bytes)
+      *pinned_bytes = 0;
+    if (budget_bytes)
+      *budget_bytes = 0;
+    return {};
+  }
+  virtual bool release_cache_handle(std::string_view) { return false; }
 
   /// Host prompt-state admission budget, when the backend accounts for it.
   struct PromptAdmissionBudget {

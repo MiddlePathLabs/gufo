@@ -7,10 +7,15 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 #include "gufo/ext/text.hpp"
 #include "src/cache/checkpoint.hpp"
 #include "src/cache/component_resources.hpp"
+#include "src/cache/handles.hpp"
 #include "src/cache/streaming.hpp"
 #include "src/cli/serve/component_cache_metrics.hpp"
 #include "src/cli/serve/continuation_types.hpp"
@@ -57,9 +62,14 @@ public:
     std::size_t PublishSnapshot(std::vector<ContinuationToken>,
                                 std::shared_ptr<const ContinuationSnapshot>,
                                 bool = false);
+    /// `wait_frontier` captures the reply-end live frontier on this lease
+    /// before returning, so RetainedCheckpoint() names the state a named
+    /// keep should pin. Without it, a concurrent peer moves that capture to
+    /// an idle worker and the returned checkpoint is the prompt boundary.
     std::size_t Commit(std::vector<ContinuationToken>,
                        std::shared_ptr<const ContinuationSnapshot> = {},
-                       std::vector<ContinuationToken> = {});
+                       std::vector<ContinuationToken> = {},
+                       bool wait_frontier = false);
     void Invalidate() noexcept;
     [[nodiscard]] std::size_t CaptureBytes() const;
     // The same for a checkpoint taken at `boundary` inside a prefill pass.
@@ -77,6 +87,12 @@ public:
     /// question about the same prefix after RAM has lost it.
     void PersistGrid(std::span<const std::size_t> planned,
                      std::size_t boundary);
+    /// Deepest checkpoint this lease retained in RAM, for a named keep
+    /// handle. Nullopt when every capture was refused or disk-only.
+    [[nodiscard]] std::optional<cache::CheckpointId> RetainedCheckpoint()
+        const noexcept;
+    /// True when RetainedCheckpoint() covers the reply's generated tokens.
+    [[nodiscard]] bool RetainedReplyEnd() const noexcept;
 
   private:
     friend class ComponentTextCache;
@@ -99,12 +115,15 @@ public:
   using RestoreRunner =
       std::function<void(std::chrono::microseconds inline_estimate,
                          const std::function<void()>& copies)>;
+  // `handle_bytes` overrides the named-handle payload bound; zero derives it
+  // from the RAM budget. Tests use a small value; serving uses the default.
   ComponentTextCache(std::shared_ptr<TextModelRunner>, std::size_t,
                      std::size_t ram_bytes,
                      const std::optional<TextRunnerDiskCacheOptions>&,
                      bool automatic_ram = false, std::size_t ceiling_bytes = 0,
                      bool ram_enabled = true,
-                     TextRunnerExpertCacheClaim experts = {});
+                     TextRunnerExpertCacheClaim experts = {},
+                     std::size_t handle_bytes = 0);
   ~ComponentTextCache();
   // With `state_tokens`, the session the prompt lands on claims them from
   // the shared state budget (StateAccount::Claim), drawing on
@@ -115,7 +134,8 @@ public:
       std::shared_ptr<const TextPromptContext>, bool, std::size_t, bool,
       bool persist = true, std::size_t state_tokens = 0,
       mem::StateReservation* reservation = nullptr,
-      const RestoreRunner& run_copies = {}, bool projection = false);
+      const RestoreRunner& run_copies = {}, bool projection = false,
+      std::string_view from_handle = {});
   // Whether sessions share their demand-mapped state (#715).
   [[nodiscard]] bool shared_state() const noexcept;
   // Whether restores copy where decode work cannot hold them up, and so may
@@ -200,6 +220,34 @@ public:
   [[nodiscard]] std::size_t capacity() const noexcept;
   // RAM the cache may retain after host limits; zero with the RAM cache off.
   [[nodiscard]] std::size_t ram_budget() const noexcept;
+
+  // Named handles map to already-retained checkpoints and pin their records;
+  // they never copy state. Keep counts as a failed operation when the
+  // checkpoint is not resident. Resolution expires TTLs and drops handles
+  // whose record was removed explicitly. The registry holds at most
+  // `handle_capacity` names and evicts the earliest expiry first.
+  static constexpr std::size_t kHandleCapacity =
+      cache::CheckpointHandles::kDefaultCapacity;
+  static constexpr std::chrono::seconds kHandleDefaultTtl =
+      cache::CheckpointHandles::kDefaultTtl;
+  [[nodiscard]] bool KeepHandle(std::string_view name,
+                                cache::CheckpointId checkpoint,
+                                std::chrono::milliseconds ttl = kHandleDefaultTtl,
+                                std::string* error = nullptr);
+  [[nodiscard]] std::optional<cache::CheckpointId> ResolveHandle(
+      std::string_view name);
+  bool DropHandle(std::string_view name);
+  [[nodiscard]] std::vector<cache::CheckpointHandles::Entry> Handles();
+  /// A live handle with the state facts a release endpoint reports.
+  struct HandleInfo {
+    std::string name;
+    cache::CheckpointId checkpoint;
+    cache::Rows tokens{0};
+    std::chrono::milliseconds ttl{0};
+  };
+  [[nodiscard]] std::vector<HandleInfo> HandleInfos();
+  /// Bytes currently pinned by handles and the budget they may claim.
+  [[nodiscard]] std::pair<std::size_t, std::size_t> HandleBytes() const;
 
 private:
   std::unique_ptr<Impl> impl_;

@@ -107,9 +107,42 @@ took 1.8 s, against about 50 s from scratch.
 | --- | --- |
 | `cache_prompt: false` | Don't reuse a checkpoint for this request. Its result can still be kept. |
 | `cache_persist: false` | Keep this request's checkpoints in RAM only, never on disk. |
+| `cache_keep: "name"` | Pin the state where this reply ends under a name (default TTL 1 hour). |
+| `cache_keep_ttl: 3600` | TTL in seconds for `cache_keep`, 1 to 604800. |
+| `cache_from: "name"` | Prefer that named checkpoint as this request's restore point. |
 
-Both work on `/v1/chat/completions`, `/v1/responses`, `/v1/completions` and
-`/completion`.
+`cache_prompt` and `cache_persist` work on `/v1/chat/completions`,
+`/v1/responses`, `/v1/completions` and `/completion`. Named handles are on
+`/v1/chat/completions`; a non-streaming response returns
+`X-Gufo-Cache-Handle: name`, or `X-Gufo-Cache-Handle-Error` when no resident
+checkpoint was retained. `cache_keep` captures the reply-end frontier even
+when other requests are running; `usage.gufo.cache_handle_scope` reports
+`reply-end`, or `prompt-boundary` when the capture was refused and only the
+shallower prompt checkpoint was pinned. Handles point at an existing
+checkpoint and add no payload copy. A handle pins its record against pressure
+until its TTL expires or it is released. The server holds at most 64 names,
+evicts the earliest expiry first, and bounds pinned payload: the first handle
+may pin up to the RAM cache budget, and every later pin is admitted only while
+the total stays within the larger of that first checkpoint and half the
+budget.
+
+`cache_from` is advisory about *placement*, never about *state*: when the
+named checkpoint is not an exact prefix of this prompt, the request runs from
+the ordinary deepest-prefix checkpoint (or cold) and
+`usage.gufo.cache_from_status` reports `not_prefix`, `missing`, `fallback` or
+`failed` instead of claiming the branch was used. A reported `used` means the
+named checkpoint is exactly the state that was restored.
+
+List and release handles without a request:
+
+```sh
+curl http://127.0.0.1:8080/v1/cache/handles
+curl -X POST http://127.0.0.1:8080/v1/cache/handles/release \
+  -H 'content-type: application/json' -d '{"name":"agent-a"}'
+```
+
+The listing reports each name, checkpoint id, token boundary, remaining TTL,
+and the pinned and budget byte totals.
 
 ## Checking reuse
 

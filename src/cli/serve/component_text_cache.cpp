@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -269,6 +270,10 @@ struct ComponentTextCache::Impl {
       Clock::time_point captured;
     };
     std::vector<ObservedWrite> observed;
+    // Serving conversation this slot currently continues. Zero until the
+    // first admission assigns one. Known conversations get a retention
+    // quota, so one long tool session cannot fill the record table.
+    std::uint64_t conversation{0};
   };
   // Disk writes still reading an entry's rows in place: the deepest one's
   // tokens and when the oldest was captured. Forgets finished and retired
@@ -328,6 +333,8 @@ struct ComponentTextCache::Impl {
   std::unique_ptr<cache::DiskCatalog> catalog;
   std::unique_ptr<cache::StreamedStore> streaming;
   std::unique_ptr<cache::PersistenceQueue> queue;
+  cache::CheckpointHandles handles;
+  std::uint64_t next_conversation{0};
   // Disk checkpoints read into the page cache ahead of their restore
   // (WarmDisk). Stopped and joined first on teardown.
   struct Warmup {
@@ -367,6 +374,10 @@ struct ComponentTextCache::Impl {
   // The cache's own RAM budget. The ledger limit adds what the slots pinned.
   // Zero when the RAM cache is off.
   std::size_t budget{};
+  // Payload bytes named handles may pin. The first pin may claim the whole
+  // budget so a deep conversation is always keepable; further pins share
+  // half of it, leaving the rest to ordinary retention.
+  std::size_t handle_budget{};
   // RAM backing committed only to copy captures on their way to disk.
   std::size_t disk_backing{};
   bool ram_enabled{true};
@@ -440,7 +451,8 @@ struct ComponentTextCache::Impl {
   Impl(std::shared_ptr<TextModelRunner> runner, std::size_t count,
        std::size_t ram, std::size_t slot_ceiling,
        const std::optional<TextRunnerDiskCacheOptions>& options,
-       bool automatic_ram, bool ram_on, TextRunnerExpertCacheClaim experts)
+       bool automatic_ram, bool ram_on, TextRunnerExpertCacheClaim experts,
+       std::size_t handle_bytes)
       : runner(std::move(runner)),
         // Disk transfers lease one fixed pinned staging buffer: one piece for
         // writes, whose speed a larger piece does not change (#562), and
@@ -650,6 +662,7 @@ struct ComponentTextCache::Impl {
       ledger.ConstrainLimits({ram + staging, ram, staging, ram});
     }
     budget = ram_enabled ? ram : 0;
+    handle_budget = handle_bytes ? handle_bytes : budget;
     FitExpertCache(experts, ram);
     if (options) {
       catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index,
@@ -1193,6 +1206,12 @@ struct ComponentTextCache::Lease::Impl {
   bool persist{true};
   bool generated_frontier{false};
   cache::CheckpointId source{};
+  // Deepest checkpoint this lease admitted to RAM.
+  std::optional<cache::CheckpointId> retained;
+  // True when `retained` is the reply-end live frontier (generated tokens
+  // included), not the shallower prompt boundary.
+  bool retained_reply_end{false};
+  std::uint64_t conversation{0};
   std::array<cache::CheckpointId, cache::RetentionPolicy::kRecordLimit>
       edit_boundaries{};
   std::size_t edit_boundary_count{};
@@ -1258,7 +1277,8 @@ struct ComponentTextCache::Lease::Impl {
         .reused_tokens = cached,
         .turn = entry->used,
         .persistable = persist,
-        .optional_frontier = generated_frontier};
+        .optional_frontier = generated_frontier,
+        .conversation = conversation};
   }
   [[nodiscard]] bool DiskGrid(std::size_t boundary) const noexcept {
     return disk_grid && boundary == disk_grid;
@@ -1571,10 +1591,11 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
 ComponentTextCache::ComponentTextCache(
     std::shared_ptr<TextModelRunner> runner, std::size_t count, std::size_t ram,
     const std::optional<TextRunnerDiskCacheOptions>& disk, bool automatic_ram,
-    std::size_t ceiling, bool ram_enabled, TextRunnerExpertCacheClaim experts)
+    std::size_t ceiling, bool ram_enabled, TextRunnerExpertCacheClaim experts,
+    std::size_t handle_bytes)
     : impl_(std::make_unique<Impl>(std::move(runner), count, ram,
                                    std::max(ram, ceiling), disk, automatic_ram,
-                                   ram_enabled, experts)) {}
+                                   ram_enabled, experts, handle_bytes)) {}
 ComponentTextCache::~ComponentTextCache() = default;
 std::size_t ComponentTextCache::capacity() const noexcept {
   return impl_->entries.size();
@@ -1583,17 +1604,139 @@ std::size_t ComponentTextCache::ram_budget() const noexcept {
   return impl_->budget;
 }
 
+bool ComponentTextCache::KeepHandle(std::string_view name,
+                                    cache::CheckpointId checkpoint,
+                                    std::chrono::milliseconds ttl,
+                                    std::string* error) {
+  const auto fail = [&](std::string message) {
+    if (error)
+      *error = std::move(message);
+    return false;
+  };
+  if (!cache::CheckpointHandles::ValidName(name))
+    return fail("handle name must be 1-64 printable ASCII characters");
+  if (ttl.count() <= 0)
+    return fail("handle TTL must be positive");
+  std::vector<cache::CheckpointHandles::Removed> removed;
+  const std::lock_guard lock(impl_->mutex);
+  if (!impl_->retention.Retains(checkpoint))
+    return fail("checkpoint is not resident");
+  // Pins keep bytes that ordinary retention could otherwise reclaim. The
+  // first pin may claim the whole RAM budget, so a deep conversation can
+  // always be kept; later pins are bounded by the larger of that first
+  // checkpoint and half the budget. A name that already pins this checkpoint
+  // adds no bytes.
+  const auto checkpoint_bytes = impl_->retention.PayloadBytes(checkpoint);
+  const auto pinned = impl_->retention.PinnedPayloadBytes();
+  const auto already =
+      impl_->retention.IsPinned(checkpoint) ? checkpoint_bytes : 0;
+  const auto others = pinned - std::min(pinned, already);
+  const auto limit =
+      others == 0 ? impl_->handle_budget : impl_->handle_budget / 2;
+  if (others + checkpoint_bytes > limit)
+    return fail("handle byte budget exceeded: pinned=" +
+                std::to_string(others) + " checkpoint=" +
+                std::to_string(checkpoint_bytes) + " budget=" +
+                std::to_string(limit));
+  if (!impl_->handles.Keep(name, checkpoint, ttl, &removed))
+    return fail("handle registry refused the name");
+  // Unpin before pinning: a replaced handle may name the same checkpoint.
+  for (const auto& entry : removed)
+    impl_->retention.Unpin(entry.checkpoint);
+  if (!impl_->retention.Pin(checkpoint)) {
+    impl_->handles.Drop(name);
+    return fail("checkpoint is not pin-able");
+  }
+  return true;
+}
+
+std::optional<cache::CheckpointId> ComponentTextCache::ResolveHandle(
+    std::string_view name) {
+  std::vector<cache::CheckpointHandles::Removed> removed;
+  const std::lock_guard lock(impl_->mutex);
+  auto checkpoint = impl_->handles.Resolve(name, &removed);
+  for (const auto& entry : removed)
+    impl_->retention.Unpin(entry.checkpoint);
+  if (checkpoint && !impl_->retention.Retains(*checkpoint)) {
+    impl_->handles.Drop(name, &removed);
+    for (const auto& entry : removed)
+      impl_->retention.Unpin(entry.checkpoint);
+    checkpoint.reset();
+  }
+  return checkpoint;
+}
+
+bool ComponentTextCache::DropHandle(std::string_view name) {
+  std::vector<cache::CheckpointHandles::Removed> removed;
+  const std::lock_guard lock(impl_->mutex);
+  const bool dropped = impl_->handles.Drop(name, &removed);
+  for (const auto& entry : removed)
+    impl_->retention.Unpin(entry.checkpoint);
+  return dropped;
+}
+
+std::vector<cache::CheckpointHandles::Entry> ComponentTextCache::Handles() {
+  std::vector<cache::CheckpointHandles::Removed> removed;
+  const std::lock_guard lock(impl_->mutex);
+  auto entries = impl_->handles.List(&removed);
+  for (const auto& entry : removed)
+    impl_->retention.Unpin(entry.checkpoint);
+  return entries;
+}
+
+std::vector<ComponentTextCache::HandleInfo> ComponentTextCache::HandleInfos() {
+  const auto now = cache::CheckpointHandles::Clock::now();
+  std::vector<cache::CheckpointHandles::Removed> removed;
+  std::vector<HandleInfo> result;
+  const std::lock_guard lock(impl_->mutex);
+  auto entries = impl_->handles.List(&removed, now);
+  for (const auto& entry : removed)
+    impl_->retention.Unpin(entry.checkpoint);
+  result.reserve(entries.size());
+  for (auto& entry : entries) {
+    const auto ttl = std::chrono::duration_cast<std::chrono::milliseconds>(
+        entry.expires - now);
+    result.push_back({std::move(entry.name), entry.checkpoint,
+                      impl_->retention.Retains(entry.checkpoint)
+                          ? impl_->retention.BoundaryOf(entry.checkpoint)
+                          : 0,
+                      ttl.count() > 0 ? ttl : std::chrono::milliseconds{0}});
+  }
+  return result;
+}
+
+std::pair<std::size_t, std::size_t> ComponentTextCache::HandleBytes() const {
+  const std::lock_guard lock(impl_->mutex);
+  return {impl_->retention.PinnedPayloadBytes(), impl_->handle_budget};
+}
+
 std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     std::span<const ContinuationToken> prompt,
     const std::function<bool()>& cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse,
     std::size_t stable, bool stop_at_eos, bool persist,
     std::size_t state_tokens, mem::StateReservation* reservation,
-    const RestoreRunner& run_copies, bool projection) {
+    const RestoreRunner& run_copies, bool projection,
+    std::string_view from_handle) {
   if (cancelled && cancelled())
     return {};
   auto input = Inputs(prompt.size(), context.get());
   cache::PrefixLookup found;
+  std::optional<cache::CheckpointId> preferred;
+  // The named checkpoint is kept separately from `preferred`: selection may
+  // reset the latter, but a report still has to name what the client asked
+  // for and whether the request used it.
+  std::optional<cache::CheckpointId> preferred_id;
+  enum class FromState : std::uint8_t {
+    kNone,
+    kMissing,
+    kNotPrefix,
+    kPreferred,
+    kUsed,
+    kFallback,
+    kFailed
+  };
+  FromState from_state = FromState::kNone;
   Impl::Entry* entry = nullptr;
   std::optional<cache::BorrowedLocation> live;
   std::vector<std::size_t> reply_starts, reply_ends;
@@ -1610,6 +1753,40 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       impl_->catalog->Reconcile();
     found =
         impl_->index.Lookup({impl_->identity, prompt, input, stable, reuse});
+    if (!from_handle.empty()) {
+      std::vector<cache::CheckpointHandles::Removed> expired;
+      preferred = impl_->handles.Resolve(from_handle, &expired);
+      for (const auto& handle : expired)
+        impl_->retention.Unpin(handle.checkpoint);
+      if (preferred && !impl_->retention.Retains(*preferred)) {
+        impl_->handles.Drop(from_handle, &expired);
+        for (const auto& handle : expired)
+          impl_->retention.Unpin(handle.checkpoint);
+        preferred.reset();
+      }
+      preferred_id = preferred;
+      if (preferred) {
+        const auto hit = std::ranges::find_if(
+            found.candidates, [&](const auto& candidate) {
+              return candidate.checkpoint &&
+                     candidate.checkpoint->Id() == *preferred;
+            });
+        if (hit != found.candidates.end()) {
+          // Keep the named branch first. Other candidates remain in the
+          // list, but using one is reported as a fallback, never silently.
+          found.selected = *hit;
+          std::rotate(found.candidates.begin(), hit, std::next(hit));
+          from_state = FromState::kPreferred;
+        } else {
+          // The named checkpoint is resident but not an exact prefix of this
+          // prompt (including a different input identity).
+          preferred.reset();
+          from_state = FromState::kNotPrefix;
+        }
+      } else {
+        from_state = FromState::kMissing;
+      }
+    }
     // A miss reports how far a stored prompt agreed, so an empty cache can
     // be told apart from one holding only incompatible boundaries.
     if (reuse && !found.selected)
@@ -1771,6 +1948,18 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       entry->durable.reset();
     }
     bool restored = bool(live);
+    // Candidate identity for the cache_from report, before any fallback.
+    const auto candidate_checkpoint = [](const cache::PrefixCandidate& c) {
+      return c.checkpoint ? c.checkpoint->Id()
+             : c.durable  ? c.durable->Manifest().checkpoint
+                          : cache::CheckpointId{};
+    };
+    if (restored && from_state == FromState::kPreferred)
+      from_state = (found.selected &&
+                    candidate_checkpoint(*found.selected) == *preferred_id)
+                       ? FromState::kUsed
+                       : FromState::kFallback;
+    std::uint64_t conversation = live ? entry->conversation : 0;
     if (live) {
       request.cached = found.selected->boundary;
       request.reply_starts = std::move(reply_starts);
@@ -1997,6 +2186,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           {
             const std::lock_guard lock(impl_->mutex);
             impl_->retention.Touch(checkpoint.Id());
+            conversation = impl_->retention.ConversationOf(checkpoint.Id());
           }
           restored = true;
         } else if (candidate.durable && impl_->streaming) {
@@ -2075,6 +2265,10 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           continue;
         }
         if (restored) {
+          if (from_state == FromState::kPreferred)
+            from_state = candidate_checkpoint(candidate) == *preferred_id
+                             ? FromState::kUsed
+                             : FromState::kFallback;
           request.cached = candidate.boundary;
           const std::lock_guard lock(impl_->mutex);
           entry->durable = candidate.durable;
@@ -2097,6 +2291,15 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           cache::ExecutionHistory::Cold(impl_->ledger,
                                         impl_->resources->adapter->Components(),
                                         impl_->identity));
+    }
+    if (!conversation) {
+      const std::lock_guard lock(impl_->mutex);
+      conversation = ++impl_->next_conversation;
+    }
+    request.conversation = conversation;
+    {
+      const std::lock_guard lock(impl_->mutex);
+      entry->conversation = conversation;
     }
     // Restore/reset may clear the attachment; install this request again.
     impl_->runner->SetPromptContext(*request.state, context);
@@ -2123,12 +2326,45 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     std::size_t nearest = 0;
     for (const auto& candidate : found.candidates)
       nearest = std::max(nearest, static_cast<std::size_t>(candidate.boundary));
+    const std::string_view from_status = [&]() -> std::string_view {
+      switch (from_state) {
+        case FromState::kMissing:
+          return "missing";
+        case FromState::kNotPrefix:
+          return "not_prefix";
+        case FromState::kPreferred:
+          return "failed";
+        case FromState::kUsed:
+          return "used";
+        case FromState::kFallback:
+          return "fallback";
+        case FromState::kFailed:
+          return "failed";
+        case FromState::kNone:
+          break;
+      }
+      return {};
+    }();
     request.lookup_result = {request.cached      ? ""
                              : !reuse            ? "disabled"
                              : common || nearest ? "no_compatible_boundary"
                                                  : "no_checkpoint",
                              request.cached ? 0 : common,
-                             request.cached ? request.cached : nearest};
+                             request.cached ? request.cached : nearest,
+                             from_status};
+    if (!from_handle.empty()) {
+      cache::Rows preferred_tokens = 0;
+      if (preferred_id) {
+        const std::lock_guard lock(impl_->mutex);
+        preferred_tokens = impl_->retention.BoundaryOf(*preferred_id);
+      }
+      Logger::Info(
+          "cache", "schema=component-cache-v1 event=cache_from name=" +
+                       std::string(from_handle) +
+                       " status=" + std::string(from_status) +
+                       " selected_tokens=" + std::to_string(request.cached) +
+                       " preferred_tokens=" + std::to_string(preferred_tokens));
+    }
     Logger::Info("cache",
                  "schema=component-cache-v1 event=acquire reuse=" +
                      std::string(live               ? "live"
@@ -2657,6 +2893,15 @@ void ComponentTextCache::Lease::PreparePrefill(std::size_t tokens) {
     impl_->cache->resources->prepare_prefill(tokens);
 }
 
+std::optional<cache::CheckpointId>
+ComponentTextCache::Lease::RetainedCheckpoint() const noexcept {
+  return impl_->retained;
+}
+
+bool ComponentTextCache::Lease::RetainedReplyEnd() const noexcept {
+  return impl_->retained_reply_end;
+}
+
 std::size_t ComponentTextCache::Lease::CaptureBytes() const {
   return impl_->entry->history->NewPayloadBytes(
       impl_->cache->resources->adapter->Positions(impl_->slot.Execution()));
@@ -2957,6 +3202,8 @@ std::size_t ComponentTextCache::Lease::PublishSnapshot(
   impl_->cache->DrainDemotion();
   if (!admitted)
     return 0;
+  impl_->retained = component->checkpoint->Id();
+  impl_->retained_reply_end = impl_->generated_frontier;
   if (retain.purpose == cache::RetentionPurpose::kHistory) {
     if (impl_->edit_boundary_count == impl_->edit_boundaries.size())
       throw std::logic_error("too many edit boundaries in one turn");
@@ -2982,7 +3229,7 @@ std::size_t ComponentTextCache::Lease::PublishSnapshot(
 std::size_t ComponentTextCache::Lease::Commit(
     std::vector<ContinuationToken> tokens,
     std::shared_ptr<const ContinuationSnapshot> snapshot,
-    std::vector<ContinuationToken> live) {
+    std::vector<ContinuationToken> live, bool wait_frontier) {
   const auto bytes =
       snapshot ? PublishSnapshot(std::move(tokens), std::move(snapshot), true)
                : 0;
@@ -2993,6 +3240,9 @@ std::size_t ComponentTextCache::Lease::Commit(
   // Optional frontier capture runs after commit when the device is idle.
   // Concurrent foreground leases keep the existing exclusive capture path;
   // an idle task must never race their execution or a new slot admission.
+  // A named keep asks for the reply-end state itself, so it opts out of the
+  // worker and pays the copy here instead of silently pinning the shallower
+  // prompt boundary.
   bool async_frontier = false;
   const bool capture_frontier =
       live.size() > impl_->prompt.size() &&
@@ -3013,6 +3263,7 @@ std::size_t ComponentTextCache::Lease::Commit(
   if (capture_frontier) {
     const std::lock_guard lock(impl_->cache->mutex);
     async_frontier =
+        !wait_frontier &&
         std::ranges::none_of(impl_->cache->entries, [&](const auto& e) {
           return e.get() != impl_->entry && (e->busy || e->frontier_active);
         });

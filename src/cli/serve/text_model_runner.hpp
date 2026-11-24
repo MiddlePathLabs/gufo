@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "gufo/ext/text.hpp"
+#include "src/cli/serve/component_text_cache.hpp"
 #include "src/cli/serve/continuation_types.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/serve/text_publication_wait.hpp"
@@ -73,6 +74,10 @@ public:
       double snapshot_ms{0.0};
       std::size_t disk_queued_bytes{0};
       double disk_enqueue_ms{0.0};
+      /// Deepest checkpoint this commit retained in RAM, for a keep handle.
+      std::optional<cache::CheckpointId> retained_checkpoint;
+      /// True when it covers the reply's generated tokens.
+      bool retained_reply_end{false};
       /// Shared-prefix snapshots queued for persistence during prefill.
     };
 
@@ -96,6 +101,11 @@ public:
     [[nodiscard]] std::optional<ComponentCacheMetrics> component_cache_metrics()
         const;
     [[nodiscard]] std::size_t prompt_tokens() const noexcept;
+    /// Deepest checkpoint this request retained in RAM, if any.
+    [[nodiscard]] std::optional<cache::CheckpointId> RetainedCheckpoint()
+        const;
+    /// True when RetainedCheckpoint() covers the reply's generated tokens.
+    [[nodiscard]] bool RetainedReplyEnd() const;
     [[nodiscard]] bool prefill_complete() const noexcept;
     [[nodiscard]] std::span<const TextRunnerToken> prompt() const noexcept;
     /// Prompt tokens already in model state, restored or prefilled.
@@ -139,11 +149,12 @@ public:
     ///
     /// Snapshot-capable runners keep the immutable prompt frontier and the
     /// final live state. Mutable-state runners publish their reported
-    /// checkpoint.
-    CommitMetrics Commit();
+    /// checkpoint. `wait_frontier` captures the reply-end live state before
+    /// returning so a named keep pins it instead of the prompt boundary.
+    CommitMetrics Commit(bool wait_frontier = false);
     /// Release a cancelled request, retaining only completed model work and
     /// an already captured prompt snapshot. Does not advance or sample tokens.
-    CommitMetrics Cancel() noexcept;
+    CommitMetrics Cancel(bool wait_frontier = false) noexcept;
     [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken();
     void CapturePromptSnapshot();
     /// Starts capture and polls completion without blocking other sessions.
@@ -224,7 +235,7 @@ public:
       bool reuse_prompt = true, std::size_t cache_prefix_tokens = 0,
       bool stop_at_eos = true, bool persist = true,
       StateTicket* state = nullptr, const RestoreCopyRunner& run_copies = {},
-      bool projection = false);
+      bool projection = false, std::string_view from_handle = {});
 
   /// Whether sessions share their demand-mapped state (#715): more sessions
   /// are configured at full context than fit at once. Each request then
@@ -234,6 +245,14 @@ public:
   /// Acquire): only where they copy on a copy engine. Otherwise they wait
   /// behind decode work, slower than stopping it to restore.
   [[nodiscard]] bool restores_beside_decode() const noexcept;
+  /// Pins a retained checkpoint under a name. See ComponentTextCache.
+  [[nodiscard]] bool KeepHandle(std::string_view name,
+                                cache::CheckpointId checkpoint,
+                                std::chrono::milliseconds ttl = {},
+                                std::string* error = nullptr);
+  bool DropHandle(std::string_view name);
+  [[nodiscard]] std::vector<ComponentTextCache::HandleInfo> HandleInfos();
+  [[nodiscard]] std::pair<std::size_t, std::size_t> HandleBytes() const;
   /// Generated tokens a request claims ahead, at admission and each time
   /// decoding nears its claim.
   static constexpr std::size_t kStateDecodeTokens = 8192;

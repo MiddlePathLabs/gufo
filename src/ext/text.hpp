@@ -507,6 +507,14 @@ struct ChatRequest {
   bool cache_prompt{true};
   bool cache_persist{true};
   bool return_progress{false};
+  /// Name the deepest checkpoint this request retains, pinning it for
+  /// `cache_keep_ttl`. Empty keeps no handle. The server returns the name in
+  /// `X-Gufo-Cache-Handle`; a later request may select it with cache_from.
+  std::string cache_keep;
+  std::chrono::milliseconds cache_keep_ttl{0};
+  /// Prefer this named retained checkpoint when the prompt extends it.
+  /// Empty uses the ordinary deepest exact-prefix selection.
+  std::string cache_from;
   /// Per-request opt-in for the runner's optional runtime residual
   /// projection (see TextRunnerCapabilities::runtime_projection): the
   /// projection stays off unless a request sets this true, and no state

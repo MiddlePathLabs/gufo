@@ -195,6 +195,10 @@ inline std::string GenerationLogDetails(
         << " ngram_disk_reads=" << result.ngram_disk_reads
         << " ngram_disk_bytes=" << result.ngram_disk_bytes
         << " ngram_wait_ms=" << result.ngram_gather_wait_ms;
+  if (!result.cache_handle.empty())
+    out << " cache_handle=" << result.cache_handle;
+  if (!result.cache_handle_error.empty())
+    out << " cache_handle_error=\"" << result.cache_handle_error << "\"";
   if (result.cache_snapshot_bytes > 0)
     out << " cache_snapshot_bytes=" << result.cache_snapshot_bytes;
   if (result.cache_disk_queued_bytes > 0)
@@ -231,6 +235,10 @@ inline json::Value GenerationTimings(
   timings["cache_restore_ms"] = result.cache_restore_ms;
   timings["cache_snapshot_ms"] = result.cache_snapshot_ms;
   timings["cache_disk_enqueue_ms"] = result.cache_disk_enqueue_ms;
+  if (!result.cache_from_status.empty())
+    timings["cache_from_status"] = result.cache_from_status;
+  if (!result.cache_handle_scope.empty())
+    timings["cache_handle_scope"] = result.cache_handle_scope;
   timings["draft_rounds"] = result.draft_rounds;
   timings["draft_n"] = result.draft_tokens;
   timings["draft_n_accepted"] = result.draft_accepted_tokens;

@@ -116,6 +116,10 @@ public:
   [[nodiscard]] SamplingDefaults sampling_defaults() const override;
   [[nodiscard]] std::uint32_t max_context() const override;
   [[nodiscard]] std::vector<SessionState> session_states() const override;
+  [[nodiscard]] std::vector<CacheHandle> cache_handles(
+      std::size_t* pinned_bytes = nullptr,
+      std::size_t* budget_bytes = nullptr) const override;
+  bool release_cache_handle(std::string_view name) override;
   [[nodiscard]] std::optional<SharedState> shared_state() const override;
   [[nodiscard]] std::optional<PromptAdmissionBudget> prompt_admission_budget()
       const override;

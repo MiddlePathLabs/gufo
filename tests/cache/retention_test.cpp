@@ -1,3 +1,4 @@
+#include "src/cache/handles.hpp"
 #include "src/cache/retention.hpp"
 
 #include <algorithm>
@@ -21,17 +22,20 @@ struct Fixture {
   PrefixIndex index{ledger};
   Log log;
   RetentionPolicy policy;
-  explicit Fixture(std::size_t limit = 128)
-      : policy(ledger, index, &log, limit) {
+  explicit Fixture(std::size_t limit = 128, std::size_t quota = 0)
+      : policy(ledger, index, &log, limit, quota) {
     index.Register({1}, kIndexComponents);
   }
   CheckpointId Add(std::vector<Token> tokens,
                    RetentionPurpose purpose = RetentionPurpose::kContinuation,
                    Rows stable = 0, CheckpointId source = {},
-                   bool preserve = true, Identity input = {}) {
+                   bool preserve = true, Identity input = {},
+                   std::uint64_t conversation = 0) {
+    RetentionRequest request{tokens, {1}, input, purpose, stable, source,
+                             preserve, {}};
+    request.conversation = conversation;
     assert(policy.Admit(
-        {tokens, {1}, input, purpose, stable, source, preserve, {}},
-        [&] { return IndexCheckpoint(ledger, tokens, {1}, input); }));
+        request, [&] { return IndexCheckpoint(ledger, tokens, {1}, input); }));
     return log.events.back().checkpoint;
   }
   Rows Cached(std::vector<Token> tokens, Identity input = {}) {
@@ -1446,6 +1450,174 @@ void CostIntervals() {
   }
   assert(rejected);
 }
+// A long tool session cannot fill the record table: its known conversation
+// is capped, and its own oldest records go before a peer's only checkpoint.
+void ConversationQuotaCapsOneSession() {
+  Fixture f(8, 2);
+  const auto a = f.Add({1, 2, 3}, RetentionPurpose::kContinuation, 0, {}, true,
+                       {}, 11);
+  const auto b = f.Add({1, 2, 3, 4}, RetentionPurpose::kContinuation, 0, a,
+                       true, {}, 11);
+  const auto c = f.Add({1, 2, 3, 4, 5}, RetentionPurpose::kContinuation, 0, b,
+                       true, {}, 11);
+  (void)c;
+  // The third capture trimmed the conversation to its quota; the newest two
+  // boundaries remain and the shallowest is gone.
+  assert(f.policy.Size() == 2);
+  assert(f.Cached({1, 2, 3, 4}) == 4);
+  assert(f.Cached({1, 2, 3, 4, 5}) == 5);
+  assert(f.Cached({1, 2, 3}) == 0);
+  // Peers keep their only checkpoints while the long conversation is at its
+  // cap, even under record pressure.
+  f.Add({7, 7}, RetentionPurpose::kContinuation, 0, {}, true, {}, 21);
+  f.Add({8, 8}, RetentionPurpose::kContinuation, 0, {}, true, {}, 22);
+  f.Add({9, 9}, RetentionPurpose::kContinuation, 0, {}, true, {}, 23);
+  f.Add({10, 10}, RetentionPurpose::kContinuation, 0, {}, true, {}, 24);
+  f.Add({11, 11}, RetentionPurpose::kContinuation, 0, {}, true, {}, 25);
+  f.Add({1, 2, 3, 4, 5, 6}, RetentionPurpose::kContinuation, 0, c, true, {},
+        11);
+  assert(f.Cached({7, 7}) == 2 && f.Cached({8, 8}) == 2 &&
+         f.Cached({9, 9}) == 2 && f.Cached({10, 10}) == 2 &&
+         f.Cached({11, 11}) == 2);
+  assert(f.policy.Size() == 7);  // two of conversation 11 plus five peers
+  // Unknown conversations keep the historical policy.
+  for (std::size_t i = 0; i < 4; ++i)
+    f.Add({static_cast<Token>(100 + i), 100},
+          RetentionPurpose::kContinuation, 0, {}, true, {}, 0);
+  assert(f.policy.Size() == 8);
+}
+
+// The 7-16 record quota is a hard per-conversation cap at record pressure:
+// the long conversation trims its own oldest records and every peer's only
+// checkpoint stays.
+void ConversationQuotaSweepKeepsPeerLastCopies() {
+  for (std::size_t quota : {7, 8, 12, 16}) {
+    Fixture f(quota + 8, quota);
+    std::vector<Token> history;
+    Token next = 1000;
+    CheckpointId source;
+    auto add_long = [&] {
+      history.push_back(next++);
+      source = f.Add(history, RetentionPurpose::kContinuation, 0, source, true,
+                     {}, 41);
+    };
+    for (std::size_t i = 0; i < quota + 2; ++i)
+      add_long();
+    assert(f.policy.Size() <= quota);
+    // The newest records survive; the oldest of the over-quota conversation
+    // does not.
+    std::vector<Token> newest(history.begin(), history.end());
+    assert(f.Cached(newest) == newest.size());
+    std::vector<Token> oldest(history.begin(), history.begin() + 1);
+    assert(f.Cached(oldest) == 0);
+    for (Token peer = 1; peer <= 8; ++peer) {
+      const std::vector<Token> tokens{peer, 77};
+      f.Add(tokens, RetentionPurpose::kContinuation, 0, {}, true, {}, 100 + peer);
+    }
+    assert(f.policy.Size() == quota + 8);
+    add_long();
+    assert(f.policy.Size() == quota + 8);
+    for (Token peer = 1; peer <= 8; ++peer) {
+      const std::vector<Token> tokens{peer, 77};
+      assert(f.Cached(tokens) == 2);
+    }
+  }
+}
+
+void HandlesRespectTtlAndCapacity() {
+  using namespace std::chrono_literals;
+  CheckpointHandles handles(2);
+  const auto start = CheckpointHandles::Clock::time_point{} + 100s;
+  std::vector<CheckpointHandles::Removed> removed;
+  assert(handles.Keep("alpha", {1}, 10s, &removed, start));
+  assert(handles.Resolve("alpha", nullptr, start + 1s) == CheckpointId{1});
+  assert(handles.Keep("beta", {2}, 20s, &removed, start));
+  assert(removed.empty());
+  // Capacity evicts the earliest expiry, not the newest name.
+  assert(handles.Keep("gamma", {3}, 30s, &removed, start + 2s));
+  assert(removed.size() == 1 && removed[0].name == "alpha" &&
+         removed[0].checkpoint == CheckpointId{1});
+  removed.clear();
+  assert(handles.Resolve("alpha", &removed, start + 3s) == std::nullopt);
+  assert(removed.empty());
+  // TTL expiry reports the checkpoint to unpin.
+  assert(handles.Resolve("beta", &removed, start + 21s) == std::nullopt);
+  assert(removed.size() == 1 && removed[0].expired &&
+         removed[0].checkpoint == CheckpointId{2});
+  assert(handles.Resolve("gamma", nullptr, start + 22s) == CheckpointId{3});
+  // A replacement reports the old pin; invalid names never enter.
+  removed.clear();
+  assert(handles.Keep("gamma", {4}, 5s, &removed, start + 23s));
+  assert(removed.size() == 1 && removed[0].checkpoint == CheckpointId{3});
+  assert(!handles.Keep("", {5}, 1s, nullptr, start));
+  assert(!handles.Keep("bad name", {5}, 1s, nullptr, start));
+  assert(!handles.Keep("delta", {5}, 0s, nullptr, start));
+}
+
+// Handle byte accounting follows the payload a pin protects and reports the
+// token boundary a release endpoint shows. Two names on one record do not
+// count its bytes twice.
+void PinnedBytesFollowPayloadAndBoundary() {
+  Fixture f(8);
+  const auto first = f.Add({1, 2, 3});
+  assert(f.policy.BoundaryOf(first) == 3);
+  const auto first_bytes = f.policy.PayloadBytes(first);
+  assert(first_bytes != 0);
+  assert(f.policy.PayloadBytes({999}) == 0);
+  assert(f.policy.BoundaryOf({999}) == 0);
+  assert(f.policy.Pin(first));
+  assert(f.policy.PinnedPayloadBytes() == first_bytes);
+  assert(f.policy.Pin(first));
+  assert(f.policy.PinnedPayloadBytes() == first_bytes);
+  f.policy.Unpin(first);
+  assert(f.policy.PinnedPayloadBytes() == first_bytes);
+  f.policy.Unpin(first);
+  assert(f.policy.PinnedPayloadBytes() == 0);
+
+  const auto second = f.Add({1, 2, 4});
+  assert(f.policy.Pin(first));
+  assert(f.policy.Pin(second));
+  assert(f.policy.PinnedPayloadBytes() ==
+         first_bytes + f.policy.PayloadBytes(second));
+}
+
+void PinnedRecordsSurvivePressure() {
+  Fixture f(2);
+  const auto first = f.Add({1, 2, 3});
+  const auto second = f.Add({7, 7});
+  assert(f.policy.Pin(first));
+  assert(f.policy.Pin(first));
+  assert(f.policy.IsPinned(first));
+  f.policy.Unpin(first);
+  assert(f.policy.IsPinned(first));
+  // A full table cannot remove the pinned record; the peer leaves instead.
+  f.Add({8, 8, 8});
+  assert(f.Cached({1, 2, 3}) == 3);
+  assert(f.Cached({7, 7}) == 0);
+  f.policy.Unpin(first);
+  assert(!f.policy.IsPinned(first));
+  f.Add({9, 9, 9});
+  assert(f.Cached({1, 2, 3}) == 0);
+  assert(f.Cached({9, 9, 9}) == 3);
+}
+
+// A pinned exact boundary keeps its checkpoint ID: republishing the same
+// tokens must not replace the record a named handle points at.
+void PinnedExactBoundaryIsNotReplaced() {
+  Fixture f(2);
+  const std::vector<Token> tokens{1, 2, 3};
+  const auto id = f.Add(tokens);
+  assert(f.policy.Pin(id));
+  RetentionRequest same{tokens, {1}, {}};
+  assert(!f.policy.Admit(same, [&] { return IndexCheckpoint(f.ledger, tokens); }));
+  assert(f.policy.Size() == 1);
+  assert(f.Cached(tokens) == 3);
+  assert(f.policy.IsPinned(id));
+  f.policy.Unpin(id);
+  assert(f.policy.Admit(same, [&] { return IndexCheckpoint(f.ledger, tokens); }));
+  assert(f.policy.Size() == 1);
+}
+
 int main() {
   CostIntervals();
   PressureDemotionRespectsDiskOptOut();
@@ -1484,4 +1656,10 @@ int main() {
   WindowPeersAlignByRow();
   ShortWindowCheckpointsAreCheap();
   RecordTurnoverAdmitsOptionalCopies();
+  ConversationQuotaCapsOneSession();
+  ConversationQuotaSweepKeepsPeerLastCopies();
+  PinnedBytesFollowPayloadAndBoundary();
+  HandlesRespectTtlAndCapacity();
+  PinnedRecordsSurvivePressure();
+  PinnedExactBoundaryIsNotReplaced();
 }
