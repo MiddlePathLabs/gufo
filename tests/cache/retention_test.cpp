@@ -1487,6 +1487,26 @@ void ConversationQuotaCapsOneSession() {
   assert(f.policy.Size() == 8);
 }
 
+// Agents that share a system prompt restore one shallow checkpoint. Only the
+// deepest record of a conversation continues it, so a second agent restoring
+// the shared prefix starts its own conversation and its own quota.
+void SharedPrefixDoesNotJoinConversation() {
+  Fixture f(16, 4);
+  const auto system = f.Add({1, 2, 3}, RetentionPurpose::kContinuation, 0, {},
+                            true, {}, 31);
+  assert(f.policy.ContinuationOf(system) == 31);
+  const auto turn = f.Add({1, 2, 3, 4, 5}, RetentionPurpose::kContinuation, 0,
+                          system, true, {}, 31);
+  assert(f.policy.ConversationOf(system) == 31);
+  assert(f.policy.ContinuationOf(system) == 0);
+  assert(f.policy.ContinuationOf(turn) == 31);
+  assert(f.policy.ContinuationOf(CheckpointId{}) == 0);
+  // Without a conversation number there is nothing to continue.
+  const auto direct = f.Add({9, 9}, RetentionPurpose::kContinuation, 0, {},
+                            true, {}, 0);
+  assert(f.policy.ContinuationOf(direct) == 0);
+}
+
 // The 7-16 record quota is a hard per-conversation cap at record pressure:
 // the long conversation trims its own oldest records and every peer's only
 // checkpoint stays.
@@ -1658,6 +1678,7 @@ int main() {
   RecordTurnoverAdmitsOptionalCopies();
   ConversationQuotaCapsOneSession();
   ConversationQuotaSweepKeepsPeerLastCopies();
+  SharedPrefixDoesNotJoinConversation();
   PinnedBytesFollowPayloadAndBoundary();
   HandlesRespectTtlAndCapacity();
   PinnedRecordsSurvivePressure();

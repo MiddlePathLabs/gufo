@@ -374,9 +374,9 @@ struct ComponentTextCache::Impl {
   // The cache's own RAM budget. The ledger limit adds what the slots pinned.
   // Zero when the RAM cache is off.
   std::size_t budget{};
-  // Payload bytes named handles may pin. The first pin may claim the whole
-  // budget so a deep conversation is always keepable; further pins share
-  // half of it, leaving the rest to ordinary retention.
+  // Payload bytes all named handles together may pin: half the RAM budget
+  // unless the caller sets it, so ordinary retention always keeps the other
+  // half however many handles clients create.
   std::size_t handle_budget{};
   // RAM backing committed only to copy captures on their way to disk.
   std::size_t disk_backing{};
@@ -662,7 +662,7 @@ struct ComponentTextCache::Impl {
       ledger.ConstrainLimits({ram + staging, ram, staging, ram});
     }
     budget = ram_enabled ? ram : 0;
-    handle_budget = handle_bytes ? handle_bytes : budget;
+    handle_budget = handle_bytes ? handle_bytes : budget / 2;
     FitExpertCache(experts, ram);
     if (options) {
       catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index,
@@ -1621,18 +1621,15 @@ bool ComponentTextCache::KeepHandle(std::string_view name,
   const std::lock_guard lock(impl_->mutex);
   if (!impl_->retention.Retains(checkpoint))
     return fail("checkpoint is not resident");
-  // Pins keep bytes that ordinary retention could otherwise reclaim. The
-  // first pin may claim the whole RAM budget, so a deep conversation can
-  // always be kept; later pins are bounded by the larger of that first
-  // checkpoint and half the budget. A name that already pins this checkpoint
-  // adds no bytes.
+  // Pins keep bytes that ordinary retention could otherwise reclaim, so all
+  // pins together stay within the handle budget. A name that already pins
+  // this checkpoint adds no bytes.
   const auto checkpoint_bytes = impl_->retention.PayloadBytes(checkpoint);
   const auto pinned = impl_->retention.PinnedPayloadBytes();
   const auto already =
       impl_->retention.IsPinned(checkpoint) ? checkpoint_bytes : 0;
   const auto others = pinned - std::min(pinned, already);
-  const auto limit =
-      others == 0 ? impl_->handle_budget : impl_->handle_budget / 2;
+  const auto limit = impl_->handle_budget;
   if (others + checkpoint_bytes > limit)
     return fail("handle byte budget exceeded: pinned=" +
                 std::to_string(others) + " checkpoint=" +
@@ -2186,7 +2183,9 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           {
             const std::lock_guard lock(impl_->mutex);
             impl_->retention.Touch(checkpoint.Id());
-            conversation = impl_->retention.ConversationOf(checkpoint.Id());
+            // A shared prefix restored by another client starts its own
+            // conversation; only the deepest record continues one.
+            conversation = impl_->retention.ContinuationOf(checkpoint.Id());
           }
           restored = true;
         } else if (candidate.durable && impl_->streaming) {

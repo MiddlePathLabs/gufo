@@ -43,6 +43,8 @@ pub fn field(
 
 /// `cache::CheckpointHandles::kDefaultTtl`.
 const DEFAULT_HANDLE_TTL_MS: i64 = 3_600_000;
+/// `cache::CheckpointHandles::kMaxTtl`, in seconds.
+const MAX_HANDLE_TTL_SECONDS: f64 = 86_400.0;
 
 /// `cache::CheckpointHandles::ValidName`: 1-64 bytes of printable,
 /// non-space ASCII.
@@ -112,12 +114,13 @@ pub fn decode(text: &[u8], defaults: &Defaults, host: &mut impl Host) -> Outcome
         draft.cache_keep = Some(copy(keep)?);
         let mut ttl_ms = DEFAULT_HANDLE_TTL_MS;
         if let Some(ttl) = non_null(&body, "cache_keep_ttl") {
-            let valid = number(ttl)
-                .filter(|seconds| seconds.is_finite() && *seconds >= 1.0 && *seconds <= 604_800.0);
+            let valid = number(ttl).filter(|seconds| {
+                seconds.is_finite() && *seconds >= 1.0 && *seconds <= MAX_HANDLE_TTL_SECONDS
+            });
             let Some(seconds) = valid else {
                 return Err(bad_request(
                     "invalid_cache_keep_ttl",
-                    "'cache_keep_ttl' must be 1-604800 seconds",
+                    "'cache_keep_ttl' must be 1-86400 seconds",
                 ));
             };
             ttl_ms = (seconds * 1000.0) as i64;

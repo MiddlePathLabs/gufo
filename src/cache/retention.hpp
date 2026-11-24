@@ -177,6 +177,12 @@ public:
   /// Conversation recorded for a resident checkpoint, or zero when the
   /// checkpoint is not retained or the caller did not supply one.
   [[nodiscard]] std::uint64_t ConversationOf(CheckpointId) const;
+  /// The conversation a request continues by restoring this checkpoint, or
+  /// zero. Only the conversation's deepest record continues it: a shallower
+  /// record is a shared prefix (a common system prompt, an earlier turn)
+  /// that a different client may restore, and inheriting its number would
+  /// merge unrelated conversations under one retention quota.
+  [[nodiscard]] std::uint64_t ContinuationOf(CheckpointId) const;
   /// A handle pins one record against every removal reason. Pinning is
   /// reference-counted so a checkpoint can back more than one handle.
   [[nodiscard]] bool Pin(CheckpointId);

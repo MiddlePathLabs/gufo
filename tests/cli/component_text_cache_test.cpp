@@ -1045,8 +1045,8 @@ void CacheFromReportsOutcome() {
   missing->Invalidate();
 }
 
-// A second pin is refused once the first one owns more than the shared half
-// of an explicit handle budget; the first stays usable.
+// All pins share one handle budget: a second pin that would take the total
+// past it is refused, and the first stays usable.
 void HandleByteBudgetRefusesSecondPin() {
   auto runner = std::make_shared<Runner>();
   constexpr std::size_t kHandleBytes = 128;
@@ -1073,7 +1073,7 @@ void HandleByteBudgetRefusesSecondPin() {
   assert(cache.KeepHandle("a", a, std::chrono::hours(1), &error));
   const auto bytes = cache.HandleBytes();
   assert(bytes.second == kHandleBytes);
-  assert(bytes.first > kHandleBytes / 2);
+  assert(bytes.first > kHandleBytes / 2 && bytes.first <= kHandleBytes);
   assert(!cache.KeepHandle("b", b, std::chrono::hours(1), &error));
   assert(error.find("byte budget") != std::string::npos);
   assert(cache.HandleInfos().size() == 1);
