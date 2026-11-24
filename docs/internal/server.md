@@ -280,6 +280,16 @@ the flag. Streams carry it on the finishing chunk and the usage chunk (Chat and
 text completions) or on the final `response` object (Responses), never on a
 content delta.
 
+`/v1/chat/completions` also takes `cache_keep` (a 1-64 character printable
+name), `cache_keep_ttl` (1-86400 seconds, default 3600) and `cache_from`.
+`cache_keep` pins the checkpoint where the reply ends; a non-streaming response
+returns `X-Gufo-Cache-Handle` or `X-Gufo-Cache-Handle-Error`, and
+`usage.gufo.cache_handle_scope` says whether the reply end or only the prompt
+boundary was pinned. `cache_from` prefers that checkpoint when the prompt
+extends it exactly and reports `usage.gufo.cache_from_status` (`used`,
+`fallback`, `not_prefix`, `missing` or `failed`). See
+[named handles](cache.md#named-handles) for pins, budgets and eviction.
+
 Qwen image identity is checked only for images consumed before each checkpoint.
 Appending an image reuses the preceding text/image state in RAM or on disk;
 changing, removing or moving an earlier image invalidates checkpoints after it.
@@ -498,6 +508,8 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `GET` | `/health` | Process liveness and GPU context (aliases: `/v1/health`, `/healthz`, `/`) |
 | `GET` | `/ready` | Model and backend readiness (aliases: `/v1/ready`, `/readyz`) |
 | `GET` | `/metrics` | Prometheus-format operational metrics (text LLM serving only) |
+| `GET` | `/v1/cache/handles` | Named cache handles, their boundaries, TTLs and pinned bytes |
+| `POST` | `/v1/cache/handles/release` | Release one named handle (`{"name": "..."}`) |
 
 ### Other model services
 

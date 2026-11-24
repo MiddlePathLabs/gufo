@@ -1,0 +1,13 @@
+{"t": 1795493633.3448904, "gtt_used": 96149815296, "mem_available": 27250577408, "container_rss": 2316061114, "gpu": {"temp": "59.0", "sclk": "(1929Mhz)"}}
+{"t": 1795493634.9928367, "gtt_used": 96309182464, "mem_available": 27095347200, "container_rss": 2893734215, "gpu": {"temp": "59.0", "sclk": "(2579Mhz)"}}
+{"t": 1795493636.9960048, "gtt_used": 96467750912, "mem_available": 26200088576, "container_rss": 3471407316, "gpu": {"temp": "62.0", "sclk": "(2705Mhz)"}}
+{"t": 1795493639.0065243, "gtt_used": 96746381312, "mem_available": 24961921024, "container_rss": 3816078442, "gpu": {"temp": "58.0", "sclk": "(2794Mhz)"}}
+{"t": 1795493641.0075362, "gtt_used": 96792612864, "mem_available": 24839303168, "container_rss": 4632122228, "gpu": {"temp": "58.0", "sclk": "(2740Mhz)"}}
+{"t": 1795493643.0118518, "gtt_used": 96793731072, "mem_available": 23880859648, "container_rss": 4686883061, "gpu": {"temp": "60.0", "sclk": "(2865Mhz)"}}
+{"t": 1795493645.013703, "gtt_used": 96797569024, "mem_available": 23832920064, "container_rss": 4838280658, "gpu": {"temp": "62.0", "sclk": "(2857Mhz)"}}
+{"t": 1795493647.0206733, "gtt_used": 96797995008, "mem_available": 23544180736, "container_rss": 6050535178, "gpu": {"temp": "62.0", "sclk": "(2806Mhz)"}}
+{"t": 1795493649.026901, "gtt_used": 96798539776, "mem_available": 22228856832, "container_rss": 6078452465, "gpu": {"temp": "64.0", "sclk": "(2846Mhz)"}}
+{"t": 1795493651.0430949, "gtt_used": 96800030720, "mem_available": 22260588544, "container_rss": 6506875453, "gpu": {"temp": "68.0", "sclk": "(2817Mhz)"}}
+{"t": 1795493653.042006, "gtt_used": 96800698368, "mem_available": 21860130816, "container_rss": 6530497773, "gpu": {"temp": "64.0", "sclk": "(2848Mhz)"}}
+{"t": 1795493655.041895, "gtt_used": 96802664448, "mem_available": 22261133312, "container_rss": 6815039356, "gpu": {"temp": "71.0", "sclk": "(2813Mhz)"}}
+{"t": 1795493657.1522596, "gtt_used": 97144307712, "mem_available": 21261258752, "container_rss": 7092064747, "gpu": {"temp": "66.0", "sclk": "(2713Mhz)"}}

@@ -1,5 +1,29 @@
 # Qwen3.8 Flash-Next experiments
 
+## Q6_K dense projections (November 23, 2026)
+
+Not merged. A mixed checkpoint with Q6_K layer dense projections (routed
+experts Q4_K/Q5_1, embeddings and head Q8_0) is 101.6 GiB against 103.7 GiB
+for UD-Q4_K_XL. With a Q6_K MMVQ kernel for 1-8 rows and llama.cpp's generic
+Q6_K MMQ for wider batches, cold prefill fell 30-32% at 8K-260K
+(1,747 to 1,187 tokens/s at 8K), and decode at 32K changed -2.7%, -2.4%,
+-8.2% and +8.0% on code_a, code_b, procedure and prose. MTP acceptance did
+not improve. Decode is ALU-bound on Q6_K unpacking, so a WMMA prefill kernel
+could not reach the +10% decode gate, and the size gain is 2.1 GiB. A
+calibrated 4-bit dense layout with an 8-bit `o_proj` is the better candidate
+if dense precision is revisited.
+
+## Joint MTP width for sampled cohorts (November 24, 2026)
+
+Not merged. A shared verification width for unseeded sampled cohorts of six
+to eight requests (seeded requests kept their own widths for replay) first
+measured +38-48% C8 throughput. Five alternating off/on pairs on fresh
+8-session 32K servers (1,164-token prose prompt, temperature 1, top-k 20,
+top-p 0.95, 256 tokens) did not reproduce it: C8 aggregate medians were
+69.2 and 67.8 tokens/s (paired median ratio 0.98). Per-request decode rose
+from 13.8 to 16.6 tokens/s and C8 wall p95 fell from 29.22 s to 24.45 s, but
+neither reached the +30% gate, and the planner chose widths of only 1-4.
+
 ## N-gram row cache and reader (November 18, 2026)
 
 The PLE table holds 320,001,536 IQ4_NL rows of 90 bytes; each token gathers

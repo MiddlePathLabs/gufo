@@ -40,6 +40,7 @@ can't honor return 400 instead of being silently dropped. The
 | `GET /v1/models` | The served model, its context length and whether it accepts images. |
 | `GET /health`, `GET /ready` | Liveness and readiness. |
 | `GET /metrics`, `/slots`, `/props` | Prometheus metrics and llama-server status. |
+| `GET /v1/cache/handles`, `POST /v1/cache/handles/release` | List and release [named cache handles](cache.md#per-request-controls). |
 
 Each other modality has its own routes; see [other model services](#other-model-services).
 

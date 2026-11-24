@@ -108,7 +108,7 @@ took 1.8 s, against about 50 s from scratch.
 | `cache_prompt: false` | Don't reuse a checkpoint for this request. Its result can still be kept. |
 | `cache_persist: false` | Keep this request's checkpoints in RAM only, never on disk. |
 | `cache_keep: "name"` | Pin the state where this reply ends under a name (default TTL 1 hour). |
-| `cache_keep_ttl: 3600` | TTL in seconds for `cache_keep`, 1 to 604800. |
+| `cache_keep_ttl: 3600` | TTL in seconds for `cache_keep`, 1 to 86400. |
 | `cache_from: "name"` | Prefer that named checkpoint as this request's restore point. |
 
 `cache_prompt` and `cache_persist` work on `/v1/chat/completions`,
@@ -120,11 +120,16 @@ when other requests are running; `usage.gufo.cache_handle_scope` reports
 `reply-end`, or `prompt-boundary` when the capture was refused and only the
 shallower prompt checkpoint was pinned. Handles point at an existing
 checkpoint and add no payload copy. A handle pins its record against pressure
-until its TTL expires or it is released. The server holds at most 64 names,
-evicts the earliest expiry first, and bounds pinned payload: the first handle
-may pin up to the RAM cache budget, and every later pin is admitted only while
-the total stays within the larger of that first checkpoint and half the
-budget.
+until its TTL expires, it is released or the server restarts. The server holds
+at most 64 names and evicts the earliest expiry first. All handles together pin
+at most half the RAM cache budget; a keep that would pass it returns
+`X-Gufo-Cache-Handle-Error`, so a deep checkpoint needs a large enough
+`--cache-ram-bytes`.
+
+The reply end includes the reply's reasoning. A later prompt extends it only
+if it replays that reasoning, as `--preserve-thinking on` does; otherwise
+`cache_from` reports `not_prefix` and the request restores the prompt
+boundary instead.
 
 `cache_from` is advisory about *placement*, never about *state*: when the
 named checkpoint is not an exact prefix of this prompt, the request runs from
@@ -143,6 +148,10 @@ curl -X POST http://127.0.0.1:8080/v1/cache/handles/release \
 
 The listing reports each name, checkpoint id, token boundary, remaining TTL,
 and the pinned and budget byte totals.
+
+> **Warning:** Like the rest of the server, these endpoints have no
+> authentication. Any client that can reach the port can list, use and release
+> every handle, and can pin up to half the RAM cache for a day.
 
 ## Checking reuse
 
