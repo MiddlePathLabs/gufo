@@ -97,6 +97,8 @@ pub struct GufoChatMetrics {
     pub cache_snapshot_ms: f64,
     pub cache_disk_enqueue_ms: f64,
     pub cache_disk_hit: bool,
+    pub cache_from_status: GufoChatBytes,
+    pub cache_handle_scope: GufoChatBytes,
     pub prefill_tokens: usize,
     pub prefill_chunks: usize,
     pub active_decode_prefill_chunks: usize,
@@ -205,6 +207,10 @@ unsafe fn read_metrics(raw: *const GufoChatMetrics) -> Option<Metrics> {
     // SAFETY: caller guarantees readable byte slices.
     let cache_miss_reason = unsafe { read_str(m.cache_miss_reason) }?.into_owned();
     // SAFETY: caller guarantees readable byte slices.
+    let cache_from_status = unsafe { read_str(m.cache_from_status) }?.into_owned();
+    // SAFETY: caller guarantees readable byte slices.
+    let cache_handle_scope = unsafe { read_str(m.cache_handle_scope) }?.into_owned();
+    // SAFETY: caller guarantees readable byte slices.
     let execution_plan = unsafe { read_str(m.execution_plan) }?.into_owned();
     // SAFETY: caller guarantees readable byte slices.
     let component_cache_json = unsafe { read_str(m.component_cache_json) }?.into_owned();
@@ -231,6 +237,8 @@ unsafe fn read_metrics(raw: *const GufoChatMetrics) -> Option<Metrics> {
         cache_snapshot_ms: m.cache_snapshot_ms,
         cache_disk_enqueue_ms: m.cache_disk_enqueue_ms,
         cache_disk_hit: m.cache_disk_hit,
+        cache_from_status,
+        cache_handle_scope,
         prefill_tokens: m.prefill_tokens,
         prefill_chunks: m.prefill_chunks,
         active_decode_prefill_chunks: m.active_decode_prefill_chunks,

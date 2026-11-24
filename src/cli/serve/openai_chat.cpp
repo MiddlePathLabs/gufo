@@ -280,6 +280,8 @@ struct MetricsHolder {
         .cache_snapshot_ms = result.cache_snapshot_ms,
         .cache_disk_enqueue_ms = result.cache_disk_enqueue_ms,
         .cache_disk_hit = result.cache_disk_hit,
+        .cache_from_status = CBytes(result.cache_from_status),
+        .cache_handle_scope = CBytes(result.cache_handle_scope),
         .prefill_tokens = result.prefill_tokens,
         .prefill_chunks = result.prefill_chunks,
         .active_decode_prefill_chunks = result.active_decode_prefill_chunks,
@@ -563,11 +565,18 @@ HttpResponse NonStreamingResponse(
          << ", inter_token;dur=" << result.mean_inter_token_ms
          << ", max_inter_token;dur=" << result.max_inter_token_ms;
 
+  std::vector<std::pair<std::string, std::string>> headers{
+      {"Server-Timing", timing.str()}};
+  if (!result.cache_handle.empty())
+    headers.emplace_back("X-Gufo-Cache-Handle", result.cache_handle);
+  if (!result.cache_handle_error.empty())
+    headers.emplace_back("X-Gufo-Cache-Handle-Error",
+                         result.cache_handle_error);
   return {
       .status = 200,
       .reason = "OK",
       .body = std::move(body),
-      .headers = {{"Server-Timing", timing.str()}},
+      .headers = std::move(headers),
       .streaming_body = {},
       .log_details = GenerationLogDetails(result),
   };

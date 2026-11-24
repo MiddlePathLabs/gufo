@@ -123,6 +123,9 @@ struct ScheduledRequest {
   std::shared_ptr<const TextPromptContext> prompt_context;
   bool cache_prompt{true};
   bool cache_persist{true};
+  std::string cache_keep;
+  std::chrono::milliseconds cache_keep_ttl{0};
+  std::string cache_from;
   std::size_t cache_prefix_tokens{0};
   // Align the prompt to a live frontier when admitted (#1154); the value
   // says whether a chat template trimmed reply whitespace.
@@ -1089,15 +1092,35 @@ struct TextGenerationScheduler::Impl {
     request->result.ngram_disk_reads = ngram.disk_reads;
     request->result.ngram_disk_bytes = ngram.disk_bytes;
     request->result.ngram_gather_wait_ms = ngram.gather_wait_ms;
+    // A named keep pins where the reply ends, so that capture may not move to
+    // an idle worker that reports a different checkpoint afterwards.
+    const bool keep_frontier = !request->cache_keep.empty();
     const auto cache_commit =
         finish_reason == TextGenerationBackend::FinishReason::kStopSequence
-            ? request->runner_request.Cancel()
-            : request->runner_request.Commit();
+            ? request->runner_request.Cancel(keep_frontier)
+            : request->runner_request.Commit(keep_frontier);
     request->result.component_cache = cache_commit.component_cache;
     request->result.cache_snapshot_bytes = cache_commit.snapshot_bytes;
     request->result.cache_snapshot_ms = cache_commit.snapshot_ms;
     request->result.cache_disk_queued_bytes = cache_commit.disk_queued_bytes;
     request->result.cache_disk_enqueue_ms = cache_commit.disk_enqueue_ms;
+    if (!request->cache_keep.empty()) {
+      std::string error;
+      const auto checkpoint = cache_commit.retained_checkpoint;
+      const auto ttl = request->cache_keep_ttl.count() > 0
+                           ? request->cache_keep_ttl
+                           : std::chrono::hours(1);
+      if (checkpoint &&
+          runner_pool->KeepHandle(request->cache_keep, *checkpoint, ttl,
+                                  &error)) {
+        request->result.cache_handle = request->cache_keep;
+        request->result.cache_handle_scope =
+            cache_commit.retained_reply_end ? "reply-end" : "prompt-boundary";
+      } else {
+        request->result.cache_handle_error =
+            checkpoint ? std::move(error) : "no resident checkpoint retained";
+      }
+    }
     FinalizeResult(request, finish_reason);
     LogDecodeProgress(request, true);
     // Recorded here rather than by the HTTP adapter, so a client that leaves
@@ -1593,7 +1616,7 @@ struct TextGenerationScheduler::Impl {
             request->cache_prefix_tokens, request->stop_at_eos,
             request->cache_persist,
             request->state_ticket ? &*request->state_ticket : nullptr,
-            beside_decoders, request->projection);
+            beside_decoders, request->projection, request->cache_from);
         // What the session did not claim returns to the budget.
         request->state_ticket.reset();
         // Each admission may restore or capture a checkpoint of its own.
@@ -1611,6 +1634,8 @@ struct TextGenerationScheduler::Impl {
         request->result.cache_common_prefix_tokens =
             lookup.common_prefix_tokens;
         request->result.cache_checkpoint_tokens = lookup.checkpoint_tokens;
+        request->result.cache_from_status =
+            std::string(lookup.cache_from_status);
         request->result.cached_prompt_tokens =
             request->runner_request.cached_prompt_tokens();
         request->live_cached_prompt_tokens.store(
@@ -2965,6 +2990,20 @@ TextGenerationScheduler::SharedStateSnapshot() const {
   };
 }
 
+std::vector<ComponentTextCache::HandleInfo>
+TextGenerationScheduler::CacheHandles() const {
+  return impl_->runner_pool->HandleInfos();
+}
+
+std::pair<std::size_t, std::size_t>
+TextGenerationScheduler::CacheHandleBytes() const {
+  return impl_->runner_pool->HandleBytes();
+}
+
+bool TextGenerationScheduler::ReleaseCacheHandle(std::string_view name) {
+  return impl_->runner_pool->DropHandle(name);
+}
+
 TextGenerationScheduler::Request TextGenerationScheduler::Submit(
     std::vector<TextRunnerToken> prompt, std::size_t max_tokens,
     const sampling::SamplingConfig& sampling,
@@ -3026,6 +3065,9 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   request->cache_prompt = metadata.cache_prompt;
   request->cache_persist = metadata.cache_persist;
   request->cache_prefix_tokens = metadata.cache_prefix_tokens;
+  request->cache_keep = std::move(metadata.cache_keep);
+  request->cache_keep_ttl = metadata.cache_keep_ttl;
+  request->cache_from = std::move(metadata.cache_from);
   // A client replays the previous answer as text, and the next prompt's
   // tokenization of it need not match the sampled tokens (#1154). Comparing
   // that text needs exact per-token decoding.

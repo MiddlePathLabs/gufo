@@ -41,6 +41,19 @@ pub fn field(
     }
 }
 
+/// `cache::CheckpointHandles::kDefaultTtl`.
+const DEFAULT_HANDLE_TTL_MS: i64 = 3_600_000;
+
+/// `cache::CheckpointHandles::ValidName`: 1-64 bytes of printable,
+/// non-space ASCII.
+fn handle_name(value: &Value) -> Option<&str> {
+    let Value::String(name) = value else {
+        return None;
+    };
+    (!name.is_empty() && name.len() <= 64 && name.bytes().all(|b| (0x21..=0x7e).contains(&b)))
+        .then_some(name.as_str())
+}
+
 /// An optional boolean member: null keeps the default.
 fn flag(body: &Value, key: &str, code: &'static str) -> Outcome<Option<bool>> {
     match non_null(body, key) {
@@ -89,6 +102,37 @@ pub fn decode(text: &[u8], defaults: &Defaults, host: &mut impl Host) -> Outcome
     )?;
     draft.cache_prompt = flag(&body, "cache_prompt", "invalid_cache_prompt")?;
     draft.cache_persist = flag(&body, "cache_persist", "invalid_cache_persist")?;
+    if let Some(keep) = non_null(&body, "cache_keep") {
+        let Some(keep) = handle_name(keep) else {
+            return Err(bad_request(
+                "invalid_cache_keep",
+                "'cache_keep' must be a 1-64 character printable name",
+            ));
+        };
+        draft.cache_keep = Some(copy(keep)?);
+        let mut ttl_ms = DEFAULT_HANDLE_TTL_MS;
+        if let Some(ttl) = non_null(&body, "cache_keep_ttl") {
+            let valid = number(ttl)
+                .filter(|seconds| seconds.is_finite() && *seconds >= 1.0 && *seconds <= 604_800.0);
+            let Some(seconds) = valid else {
+                return Err(bad_request(
+                    "invalid_cache_keep_ttl",
+                    "'cache_keep_ttl' must be 1-604800 seconds",
+                ));
+            };
+            ttl_ms = (seconds * 1000.0) as i64;
+        }
+        draft.cache_keep_ttl_ms = Some(ttl_ms);
+    }
+    if let Some(from) = non_null(&body, "cache_from") {
+        let Some(from) = handle_name(from) else {
+            return Err(bad_request(
+                "invalid_cache_from",
+                "'cache_from' must be a 1-64 character printable name",
+            ));
+        };
+        draft.cache_from = Some(copy(from)?);
+    }
     field(host, HostField::Stop, 0, body.get("stop"))?;
 
     let items = match body.get_mut("messages") {

@@ -2,6 +2,7 @@
 
 #include <gufo/chat_request.h>
 
+#include <chrono>
 #include <exception>
 #include <memory>
 #include <new>
@@ -353,6 +354,15 @@ struct Decoder {
         return;
       case GUFO_CHAT_OP_RETURN_PROGRESS:
         chat.return_progress = on;
+        return;
+      case GUFO_CHAT_OP_CACHE_KEEP:
+        chat.cache_keep = std::move(text);
+        return;
+      case GUFO_CHAT_OP_CACHE_KEEP_TTL:
+        chat.cache_keep_ttl = std::chrono::milliseconds(event.integer);
+        return;
+      case GUFO_CHAT_OP_CACHE_FROM:
+        chat.cache_from = std::move(text);
         return;
       case GUFO_CHAT_OP_PROJECTION:
         chat.projection = on;

@@ -103,10 +103,15 @@ std::vector<CaptureCandidate> PlanCaptures(const Adapter& adapter,
   return result;
 }
 RetentionPolicy::RetentionPolicy(ResourceLedger& ledger, PrefixIndex& index,
-                                 RetentionEventSink* sink, std::size_t limit)
+                                 RetentionEventSink* sink, std::size_t limit,
+                                 std::size_t conversation_quota)
     : ledger_(ledger), index_(index), sink_(sink), limit_(limit) {
   if (!limit || limit > kRecordLimit)
     throw std::invalid_argument("invalid retention record limit");
+  conversation_quota_ =
+      conversation_quota ? conversation_quota : std::max<std::size_t>(1, limit / 8);
+  if (conversation_quota_ > limit)
+    throw std::invalid_argument("invalid retention conversation quota");
   metadata_ =
       ledger.Reserve(ResourceCategory::kMetadata, sizeof(*this)).Convert();
 }
@@ -115,6 +120,54 @@ RetentionPolicy::~RetentionPolicy() {
     if (records_[i].checkpoint)
       Erase(i, RetentionReason::kShutdown, Priority(i));
 }
+std::uint64_t RetentionPolicy::ConversationOf(CheckpointId id) const {
+  const auto i = Find(id);
+  return i == limit_ ? 0 : conversations_[i];
+}
+
+bool RetentionPolicy::Pin(CheckpointId id) {
+  const auto i = Find(id);
+  if (i == limit_ || !records_[i].checkpoint)
+    return false;
+  if (pins_[i] != std::numeric_limits<std::uint8_t>::max())
+    ++pins_[i];
+  return true;
+}
+
+void RetentionPolicy::Unpin(CheckpointId id) {
+  const auto i = Find(id);
+  if (i != limit_ && pins_[i] != 0)
+    --pins_[i];
+}
+
+bool RetentionPolicy::IsPinned(CheckpointId id) const {
+  const auto i = Find(id);
+  return i != limit_ && pins_[i] != 0;
+}
+
+bool RetentionPolicy::Retains(CheckpointId id) const {
+  const auto i = Find(id);
+  return i != limit_ && records_[i].checkpoint != nullptr;
+}
+
+std::size_t RetentionPolicy::PayloadBytes(CheckpointId id) const {
+  const auto i = Find(id);
+  return i == limit_ ? 0 : UniquePayloadBytes(i);
+}
+
+std::size_t RetentionPolicy::PinnedPayloadBytes() const {
+  std::size_t bytes = 0;
+  for (std::size_t i = 0; i < limit_; ++i)
+    if (records_[i].checkpoint && pins_[i] != 0)
+      bytes += UniquePayloadBytes(i);
+  return bytes;
+}
+
+Rows RetentionPolicy::BoundaryOf(CheckpointId id) const {
+  const auto i = Find(id);
+  return i == limit_ ? 0 : records_[i].checkpoint->Boundary();
+}
+
 std::size_t RetentionPolicy::Find(CheckpointId id) const {
   for (std::size_t i = 0; i < limit_; ++i)
     if (records_[i].checkpoint && records_[i].checkpoint->Id() == id)
@@ -205,6 +258,15 @@ std::uint32_t RetentionPolicy::Priority(
   }
   return 3;
 }
+std::size_t RetentionPolicy::ConversationCount(
+    std::uint64_t conversation) const {
+  std::size_t count = 0;
+  for (std::size_t i = 0; i < limit_; ++i)
+    if (records_[i].checkpoint && conversations_[i] == conversation)
+      ++count;
+  return count;
+}
+
 bool RetentionPolicy::Related(std::size_t root, std::size_t peer) const {
   const auto& a = *records_[root].checkpoint;
   const auto& b = *records_[peer].checkpoint;
@@ -460,6 +522,15 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
             : 1U,
         records_[i].last_used};
   };
+  bool has_multi_record_conversation = false;
+  for (std::size_t i = 0; i < limit_; ++i) {
+    const auto conversation = conversations_[i];
+    if (records_[i].checkpoint && conversation &&
+        ConversationCount(conversation) > 1) {
+      has_multi_record_conversation = true;
+      break;
+    }
+  }
   // An unchanged retry's full-prompt copy may replace the checkpoint it was
   // restored from when only the assistant framing separates them: the copy
   // covers every prompt the source did except an edit inside those few
@@ -501,7 +572,7 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
                 resumed_tail
             ? 2
             : MaxRank(r.purpose);
-    if (!records_[i].checkpoint || Persisting(i) ||
+    if (!records_[i].checkpoint || Persisting(i) || pins_[i] != 0 ||
         std::ranges::find(r.protected_checkpoints,
                           records_[i].checkpoint->Id()) !=
             r.protected_checkpoints.end())
@@ -575,9 +646,27 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
   // Byte pressure may select a last copy while covered records remain. The
   // redundant source still advances only when every candidate is a last copy.
   std::uint32_t lowest = 3;
+  // Record pressure takes an over-quota record first. The incoming
+  // conversation at its quota also yields one of its own records, so a new
+  // record never grows past the cap. The rest of the table keeps the
+  // historical rank order.
+  std::size_t crowded = limit_;
   for (std::size_t i = 0; i < limit_; ++i) {
     if ((!eligible(i) && !stale(i)) || i == source)
       continue;
+    if (record_pressure) {
+      const auto conversation = conversations_[i];
+      if (conversation) {
+        const auto count = ConversationCount(conversation);
+        const bool over =
+            count > conversation_quota_ ||
+            (conversation == r.conversation &&
+             count >= conversation_quota_);
+        if (over &&
+            (crowded == limit_ || record_order(i) < record_order(crowded)))
+          crowded = i;
+      }
+    }
     if (!record_pressure) {
       lowest = std::min(lowest, priority(i));
       const auto candidate = PressureOrder(i, r, priority(i));
@@ -586,9 +675,18 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
         order = candidate;
       }
     } else if (target == limit_ || record_order(i) < record_order(target)) {
+      // A peer's only record is a last-resort victim while another
+      // conversation still holds several records.
+      const auto conversation = conversations_[i];
+      if (has_multi_record_conversation && conversation &&
+          conversation != r.conversation &&
+          ConversationCount(conversation) == 1)
+        continue;
       target = i;
     }
   }
+  if (crowded != limit_)
+    target = crowded;
   if (target == limit_ && replaces_source)
     return source;
   // preserve_source protects byte admission while capture is incomplete. At
@@ -648,6 +746,8 @@ void RetentionPolicy::Erase(std::size_t i, RetentionReason reason,
   }
   index_.DropResident(e.entry);
   e = {};
+  conversations_[i] = 0;
+  pins_[i] = 0;
   for (auto& peer : records_)
     peer.below.reset(i);
   --size_;
@@ -703,12 +803,19 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
   }
   if (exact == limit_ && size_ == limit_ && Victim(r, true) == limit_)
     return refuse(RetentionReason::kRecordCapacity);
+  // A named handle must keep the checkpoint it names. A duplicate capture at
+  // the same boundary would replace that record with a new checkpoint ID
+  // and silently invalidate the handle, so leave the pinned record alone.
+  if (exact != limit_ && pins_[exact] != 0)
+    return refuse(RetentionReason::kExactReplacement);
   // An exact replacement keeps its conversation's reuse.
   std::optional<std::uint64_t> reused_at;
   bool frontier_used = false;
+  std::uint64_t exact_conversation = 0;
   if (exact != limit_) {
     reused_at = records_[exact].ReusedAt();
     frontier_used = records_[exact].frontier_used;
+    exact_conversation = conversations_[exact];
   }
   while (true) {
     if (r.stop.stop_requested())
@@ -734,9 +841,14 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
       if (exact != limit_ && records_[exact].checkpoint) {
         reused_at = records_[exact].ReusedAt();
         frontier_used = records_[exact].frontier_used;
+        exact_conversation = conversations_[exact];
         Erase(exact, RetentionReason::kExactReplacement, Priority(exact, &r));
       } else if (size_ == limit_) {
         const auto victim = Victim(r, true);
+        if (victim == limit_) {
+          index_.Erase(entry);
+          return refuse(RetentionReason::kRecordCapacity);
+        }
         const auto source = Find(r.source);
         const bool edited =
             source != limit_ &&
@@ -754,6 +866,8 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
       auto& e = records_[target];
       e = {std::move(checkpoint), entry, purpose, r.stable, ++clock_};
       e.turn = r.turn ? r.turn : clock_;
+      conversations_[target] =
+          r.conversation ? r.conversation : exact_conversation;
       e.persistable = r.persistable;
       e.frontier_used = frontier_used;
       ++size_;
@@ -766,6 +880,30 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
       Relate(target);
       if (r.reused || reused_at)
         e.SetReusedAt(r.reused ? admitted_bytes_ : *reused_at);
+      // The quota is a hard cap for a known conversation. Trim its oldest
+      // records after publication, so a failed capture never costs one.
+      if (conversations_[target]) {
+        const auto conversation = conversations_[target];
+        while (ConversationCount(conversation) > conversation_quota_) {
+          std::size_t victim = limit_;
+          for (std::size_t i = 0; i < limit_; ++i) {
+            if (i == target || !records_[i].checkpoint ||
+                conversations_[i] != conversation ||
+                pins_[i] != 0 || Persisting(i) ||
+                std::ranges::find(r.protected_checkpoints,
+                                  records_[i].checkpoint->Id()) !=
+                    r.protected_checkpoints.end())
+              continue;
+            if (victim == limit_ ||
+                records_[i].last_used < records_[victim].last_used)
+              victim = i;
+          }
+          if (victim == limit_)
+            break;
+          Erase(victim, RetentionReason::kRecordCapacity,
+                Priority(victim, &r));
+        }
+      }
       Emit(RetentionAction::kAdmitted, RetentionReason::kCaptured,
            e.checkpoint->Id(), e.checkpoint->Boundary(), purpose,
            Priority(target), e.last_used);

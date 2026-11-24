@@ -92,6 +92,9 @@ public:
     bool cache_prompt{true};
     /// False keeps this request's checkpoints out of the disk cache.
     bool cache_persist{true};
+    std::string cache_keep;
+    std::chrono::milliseconds cache_keep_ttl{0};
+    std::string cache_from;
     std::size_t cache_prefix_tokens{0};
     bool stop_at_eos{true};
     /// This request's runtime-projection opt-in (ChatRequest::projection);
@@ -174,6 +177,11 @@ public:
   /// Null unless sessions share their demand-mapped state (#715).
   [[nodiscard]] std::optional<TextGenerationBackend::SharedState>
   SharedStateSnapshot() const;
+  /// Named cache handles and the bytes they pin.
+  [[nodiscard]] std::vector<ComponentTextCache::HandleInfo> CacheHandles() const;
+  [[nodiscard]] std::pair<std::size_t, std::size_t> CacheHandleBytes() const;
+  /// Releases one named handle. False when the name was not live.
+  bool ReleaseCacheHandle(std::string_view name);
 
   [[nodiscard]] Request Submit(std::vector<TextRunnerToken> prompt,
                                std::size_t max_tokens,

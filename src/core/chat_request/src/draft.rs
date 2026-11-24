@@ -184,6 +184,9 @@ pub struct Draft {
     pub cache_persist: Option<bool>,
     pub return_progress: Option<bool>,
     pub projection: Option<bool>,
+    pub cache_keep: Option<String>,
+    pub cache_keep_ttl_ms: Option<i64>,
+    pub cache_from: Option<String>,
     pub add_vision_id: Option<bool>,
     pub reasoning: Reasoning,
     pub tools: Tools,
@@ -201,6 +204,9 @@ impl Draft {
             cache_persist: None,
             return_progress: None,
             projection: None,
+            cache_keep: None,
+            cache_keep_ttl_ms: None,
+            cache_from: None,
             add_vision_id: None,
             reasoning,
             tools,
@@ -215,6 +221,15 @@ impl Draft {
         if let Some(value) = self.max_tokens {
             let value = i64::try_from(value).map_err(|_| crate::error::Failure::Internal)?;
             host.emit(Op::MaxTokens, 0, value, &[])?;
+        }
+        if let Some(name) = &self.cache_keep {
+            host.emit(Op::CacheKeep, 0, 0, name.as_bytes())?;
+        }
+        if let Some(ttl_ms) = self.cache_keep_ttl_ms {
+            host.emit(Op::CacheKeepTtl, 0, ttl_ms, &[])?;
+        }
+        if let Some(name) = &self.cache_from {
+            host.emit(Op::CacheFrom, 0, 0, name.as_bytes())?;
         }
         let flags = [
             (Op::Stream, self.stream),

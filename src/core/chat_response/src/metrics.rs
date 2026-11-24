@@ -26,6 +26,8 @@ pub struct Metrics {
     pub cache_snapshot_ms: f64,
     pub cache_disk_enqueue_ms: f64,
     pub cache_disk_hit: bool,
+    pub cache_from_status: String,
+    pub cache_handle_scope: String,
     pub prefill_tokens: usize,
     pub prefill_chunks: usize,
     pub active_decode_prefill_chunks: usize,
@@ -178,6 +180,20 @@ pub fn usage_json(m: &Metrics) -> Value {
         "cache_disk_hit",
         Value::Bool(m.cache_disk_hit),
     );
+    if !m.cache_from_status.is_empty() {
+        push_member(
+            &mut metrics,
+            "cache_from_status",
+            Value::String(m.cache_from_status.clone()),
+        );
+    }
+    if !m.cache_handle_scope.is_empty() {
+        push_member(
+            &mut metrics,
+            "cache_handle_scope",
+            Value::String(m.cache_handle_scope.clone()),
+        );
+    }
     push_member(&mut metrics, "draft_rounds", num_usize(m.draft_rounds));
     push_member(&mut metrics, "prefill_tokens", num_usize(m.prefill_tokens));
     push_member(&mut metrics, "prefill_chunks", num_usize(m.prefill_chunks));

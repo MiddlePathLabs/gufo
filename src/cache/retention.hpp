@@ -115,6 +115,12 @@ struct RetentionRequest {
   bool persistable{true};
   // A speculative generated copy may replace only another unused frontier.
   bool optional_frontier{false};
+  // Serving conversation this record belongs to, when the caller knows one.
+  // Zero keeps the per-conversation quota out of the record: the historical
+  // prefix-relation policy. A known conversation may retain at most
+  // RetentionPolicy::ConversationQuota records, so one long tool session
+  // cannot fill the table and evict every peer's last checkpoint.
+  std::uint64_t conversation{0};
 };
 // Caller serializes policy, index and history operations. Ledger and index
 // outlive this object; sink, if present, does too. Callbacks/sinks cannot
@@ -141,8 +147,11 @@ class RetentionPolicy {
 public:
   static constexpr std::size_t kRecordLimit = 128;
   using Capture = std::function<std::shared_ptr<const Checkpoint>()>;
+  // `conversation_quota` caps each known conversation; zero derives
+  // max(1, record_limit / 8), leaving the other seven eighths to peers.
   RetentionPolicy(ResourceLedger&, PrefixIndex&, RetentionEventSink* = nullptr,
-                  std::size_t record_limit = kRecordLimit);
+                  std::size_t record_limit = kRecordLimit,
+                  std::size_t conversation_quota = 0);
   ~RetentionPolicy();
   RetentionPolicy(const RetentionPolicy&) = delete;
   RetentionPolicy& operator=(const RetentionPolicy&) = delete;
@@ -165,6 +174,27 @@ public:
   void Touch(CheckpointId);
   void Remove(CheckpointId);
   [[nodiscard]] std::uint32_t Rank(CheckpointId) const;
+  /// Conversation recorded for a resident checkpoint, or zero when the
+  /// checkpoint is not retained or the caller did not supply one.
+  [[nodiscard]] std::uint64_t ConversationOf(CheckpointId) const;
+  /// A handle pins one record against every removal reason. Pinning is
+  /// reference-counted so a checkpoint can back more than one handle.
+  [[nodiscard]] bool Pin(CheckpointId);
+  void Unpin(CheckpointId);
+  [[nodiscard]] bool IsPinned(CheckpointId) const;
+  [[nodiscard]] bool Retains(CheckpointId) const;
+  /// Unique payload bytes the checkpoint owns, for a handle byte budget.
+  /// Zero when it is not retained.
+  [[nodiscard]] std::size_t PayloadBytes(CheckpointId) const;
+  /// Sum of PayloadBytes over every pinned record. Shared chunks between two
+  /// pinned records are counted once per record, so this is an upper bound.
+  [[nodiscard]] std::size_t PinnedPayloadBytes() const;
+  /// Token boundary of a retained checkpoint, for handle listings.
+  [[nodiscard]] Rows BoundaryOf(CheckpointId) const;
+  [[nodiscard]] bool Contains(CheckpointId id) const { return Find(id) != limit_; }
+  [[nodiscard]] std::size_t ConversationQuota() const noexcept {
+    return conversation_quota_;
+  }
   [[nodiscard]] std::size_t Size() const { return size_; }
   [[nodiscard]] std::size_t RetainedPayloadBytes() const noexcept;
 
@@ -199,6 +229,7 @@ private:
   bool Branch(std::size_t) const;
   std::uint32_t Priority(std::size_t, const RetentionRequest* = nullptr) const;
   bool Related(std::size_t, std::size_t) const;
+  [[nodiscard]] std::size_t ConversationCount(std::uint64_t) const;
   void Relate(std::size_t);
   std::array<std::uint64_t, 5> PressureOrder(std::size_t,
                                              const RetentionRequest&,
@@ -217,7 +248,14 @@ private:
   std::function<void(std::shared_ptr<const Checkpoint>)> demote_;
   ResourceCharge metadata_;
   std::array<Record, kRecordLimit> records_;
-  std::size_t limit_, size_{};
+  // Kept outside Record so the existing record layout and its metadata
+  // charge stay unchanged. 32 bits cover a process lifetime; the cache
+  // allocates one per cold request.
+  std::array<std::uint32_t, kRecordLimit> conversations_{};
+  // Named handles currently pinning a slot (at most 64 by default). Counts,
+  // because two names may reference one checkpoint.
+  std::array<std::uint8_t, kRecordLimit> pins_{};
+  std::size_t limit_, size_{}, conversation_quota_{};
   std::uint64_t clock_{}, sequence_{};
   // Unique payload bytes admitted so far; measures budget turnover.
   std::uint64_t admitted_bytes_{};

@@ -202,7 +202,9 @@ struct InferenceBackend::Impl {
       const std::vector<std::string>& stop_sequences = {},
       InitialOutputState initial = InitialOutputState::kContent,
       bool cache_persist = true, bool projection = false,
-      bool chat_template = false) const {
+      bool chat_template = false, std::string cache_keep = {},
+      std::chrono::milliseconds cache_keep_ttl = {},
+      std::string cache_from = {}) const {
     Result result;
     result.prompt_tokens = prompt_tokens.size();
     result.client_id = client_id.empty() ? "anonymous" : client_id;
@@ -224,6 +226,9 @@ struct InferenceBackend::Impl {
             .prompt_context = std::move(context),
             .cache_prompt = cache_prompt,
             .cache_persist = cache_persist,
+            .cache_keep = std::move(cache_keep),
+            .cache_keep_ttl = cache_keep_ttl,
+            .cache_from = std::move(cache_from),
             .cache_prefix_tokens = cache_prefix_tokens,
             .projection = projection,
             .stop_sequences = stop_sequences,
@@ -471,6 +476,46 @@ std::vector<InferenceBackend::SessionState> InferenceBackend::session_states()
 #endif
 }
 
+std::vector<InferenceBackend::CacheHandle> InferenceBackend::cache_handles(
+    std::size_t* pinned_bytes, std::size_t* budget_bytes) const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr) {
+    if (pinned_bytes)
+      *pinned_bytes = 0;
+    if (budget_bytes)
+      *budget_bytes = 0;
+    return {};
+  }
+  const auto [pinned, budget] = state->scheduler->CacheHandleBytes();
+  if (pinned_bytes)
+    *pinned_bytes = pinned;
+  if (budget_bytes)
+    *budget_bytes = budget;
+  std::vector<CacheHandle> result;
+  for (const auto& handle : state->scheduler->CacheHandles())
+    result.push_back({std::move(handle.name), handle.checkpoint.value,
+                      handle.tokens, handle.ttl.count()});
+  return result;
+#else
+  if (pinned_bytes)
+    *pinned_bytes = 0;
+  if (budget_bytes)
+    *budget_bytes = 0;
+  return {};
+#endif
+}
+
+bool InferenceBackend::release_cache_handle(std::string_view name) {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state != nullptr && state->scheduler->ReleaseCacheHandle(name);
+#else
+  (void)name;
+  return false;
+#endif
+}
+
 std::optional<InferenceBackend::SharedState> InferenceBackend::shared_state()
     const {
 #if defined(ENGINE_ENABLE_HIP)
@@ -697,7 +742,8 @@ InferenceBackend::Result InferenceBackend::chat(
       std::move(prompt->context), request.cache_prompt,
       prompt->cache_prefix_tokens, request.stop_sequences, initial,
       request.cache_persist, effective_request.projection.value_or(false),
-      true);
+      true, effective_request.cache_keep,
+      effective_request.cache_keep_ttl, effective_request.cache_from);
 #else
   (void)request;
   (void)max_tokens;
@@ -798,6 +844,9 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .prompt_context = std::move(prompt->context),
           .cache_prompt = request.cache_prompt,
           .cache_persist = request.cache_persist,
+          .cache_keep = effective_request.cache_keep,
+          .cache_keep_ttl = effective_request.cache_keep_ttl,
+          .cache_from = effective_request.cache_from,
           .cache_prefix_tokens = prompt->cache_prefix_tokens,
           .projection = effective_request.projection.value_or(false),
           .stop_sequences = request.stop_sequences,

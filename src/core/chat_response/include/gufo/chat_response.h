@@ -59,6 +59,9 @@ typedef struct GufoChatMetrics {
   double cache_snapshot_ms;
   double cache_disk_enqueue_ms;
   bool cache_disk_hit;
+  /* Empty leaves the usage member out. */
+  GufoChatBytes cache_from_status;
+  GufoChatBytes cache_handle_scope;
   size_t prefill_tokens;
   size_t prefill_chunks;
   size_t active_decode_prefill_chunks;

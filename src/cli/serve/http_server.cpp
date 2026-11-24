@@ -1112,6 +1112,49 @@ HttpResponse LlamaSlots(const HttpRequest&, TextGenerationBackend& b) {
   return Ok(resp);
 }
 
+/// Named checkpoint handles and the payload bytes they pin.
+HttpResponse CacheHandles(const HttpRequest&, TextGenerationBackend& b) {
+  std::size_t pinned = 0, budget = 0;
+  const auto handles = b.cache_handles(&pinned, &budget);
+  json::Value resp = json::Value::object();
+  resp["pinned_bytes"] = pinned;
+  resp["budget_bytes"] = budget;
+  json::Value list = json::Value::array();
+  for (const auto& handle : handles) {
+    json::Value item = json::Value::object();
+    item["name"] = handle.name;
+    item["checkpoint"] = handle.checkpoint;
+    item["tokens"] = handle.tokens;
+    item["ttl_ms"] = handle.ttl_ms;
+    list.push_back(std::move(item));
+  }
+  resp["handles"] = std::move(list);
+  return Ok(resp);
+}
+
+/// Releases one named handle so its record competes for eviction again.
+HttpResponse ReleaseCacheHandle(const HttpRequest& req,
+                                TextGenerationBackend& b) {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+  const auto* name = body.find("name");
+  if (name == nullptr || !name->is_string() || name->str().empty())
+    return Err(400, "Bad Request", "'name' must be a non-empty string",
+               "invalid_request_error", "invalid_handle_name");
+  const std::string requested = name->str();
+  if (!b.release_cache_handle(requested))
+    return Err(404, "Not Found", "cache handle not found",
+               "invalid_request_error", "cache_handle_not_found");
+  json::Value resp = json::Value::object();
+  resp["released"] = requested;
+  return Ok(resp);
+}
+
 /// Context held by in-flight requests across all sessions.
 double KvCacheUsageRatio(const TextGenerationBackend& b) {
   const auto sessions = b.session_states();
@@ -1295,6 +1338,10 @@ void HttpServer::register_routes() {
   add("GET", "/v1/slots", LlamaSlots);
   add("GET", "/metrics", LlamaMetrics);
   add("GET", "/v1/metrics", LlamaMetrics);
+
+  // ---- named cache handles ----
+  add("GET", "/v1/cache/handles", CacheHandles);
+  add("POST", "/v1/cache/handles/release", ReleaseCacheHandle);
 
   // ---- sdapi ----
   add("POST", "/sdapi/v1/txt2img", NotImplemented);

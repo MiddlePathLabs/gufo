@@ -137,6 +137,11 @@ typedef enum GufoChatOp {
   GUFO_CHAT_OP_NAMESPACE_VALUE = 23, /* [text] */
   /* ChatRequest::projection, assigned. */
   GUFO_CHAT_OP_PROJECTION = 24, /* [int] */
+  /* ChatRequest::cache_keep, cache_keep_ttl (milliseconds) and cache_from;
+     names are already checked against CheckpointHandles::ValidName. */
+  GUFO_CHAT_OP_CACHE_KEEP = 25,     /* [text] */
+  GUFO_CHAT_OP_CACHE_KEEP_TTL = 26, /* [int] */
+  GUFO_CHAT_OP_CACHE_FROM = 27,     /* [text] */
   /* Appends a ChatTool after the request's current ones. */
   GUFO_CHAT_OP_TOOL = 30,             /* [text] name */
   GUFO_CHAT_OP_TOOL_DESCRIPTION = 31, /* [text] */
