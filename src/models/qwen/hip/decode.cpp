@@ -1,4 +1,5 @@
 #if defined(ENGINE_ENABLE_HIP)
+#include <bit>
 #include <gufo/ext/experimental/dispatch_telemetry.hpp>
 #include <gufo/ext/experimental/hip_utils.hpp>
 #include <stdexcept>
@@ -62,6 +63,11 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
   }
   graph_key.workload_identity = ExtendQwenGraphWorkloadIdentity(
       graph_key.workload_identity, arena_.RecurrentIoIdentity());
+  // A captured graph bakes the projection launches and their lambda.
+  if (projection_ != nullptr)
+    graph_key.workload_identity = ExtendQwenGraphWorkloadIdentity(
+        graph_key.workload_identity,
+        std::bit_cast<std::uint32_t>(ProjectionLambda()));
   const QwenGraphRejection graph_rejections = ResolveQwenGraphRejections(
       compute_logits, use_split_k_decode,
       graph_executor_.IsEnabled() &&
@@ -88,18 +94,20 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
       const bool ok =
           graph_executor_.TryCapture(arena_.stream, graph_key, [&]() {
             ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
-                              compute_logits, recurrent_state, &vision_input_);
+                              compute_logits, recurrent_state, &vision_input_,
+                              PassProjection());
           });
       if (ok) {
         launch_captured_graph();
       } else {
         ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
-                          compute_logits, recurrent_state, &vision_input_);
+                          compute_logits, recurrent_state, &vision_input_,
+                          PassProjection());
       }
     }
   } else {
     ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos, compute_logits,
-                      recurrent_state, &vision_input_);
+                      recurrent_state, &vision_input_, PassProjection());
   }
 
   if (!compute_logits) {

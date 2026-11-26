@@ -52,7 +52,10 @@ double QwenGpuExecutor::PrefillPassCost(std::size_t rows) const {
   // all weights once, about 120 ms, and each row then costs about 2.25 ms,
   // or 1.80 ms on the FP16 route of a large low-bit pass.
   return 120.0 + static_cast<double>(rows) *
-                     (UseQwen27bFp16Prefill(weights_, rows) ? 1.80 : 2.25);
+                     (!PassProjection().Active() &&
+                              UseQwen27bFp16Prefill(weights_, rows)
+                          ? 1.80
+                          : 2.25);
 }
 
 tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
@@ -110,7 +113,11 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   vision_input_.Inject(scratch.decode.hidden.data(), start_pos, batch_size,
                        hidden_size, 1, arena_.stream);
 
-  const bool half_prefill = UseQwen27bFp16Prefill(weights_, batch_size);
+  // The FP16 route adds each writer's output inside its GEMM epilogue, so a
+  // steered pass, which must project that output first, takes the FP32 route.
+  const QwenPassProjection projection = PassProjection();
+  const bool half_prefill =
+      !projection.Active() && UseQwen27bFp16Prefill(weights_, batch_size);
   const auto gemm_weight = [&](const models::QwenTensorRef& w,
                                const void* bf16_input, const float* fp32_input,
                                float* output, std::size_t m, std::size_t k,
@@ -522,6 +529,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       }
     }
 
+    projection.Apply(l, models::qwen::QwenProjectionSite::kMixer,
+                     arena_.d_attn_out, batch_size, arena_.stream);
     if (half_prefill) {
       LaunchBatchedRMSNormFp16(output_hidden, nullptr,
                                static_cast<const float*>(layer.ffn_norm.data),
@@ -643,6 +652,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       gemm_weight(layer.ffn_down, ffn_down_input, arena_.d_ffn_act,
                   arena_.d_ffn_out, hidden_size, intermediate_size,
                   ffn_down_q8_act);
+      projection.Apply(l, models::qwen::QwenProjectionSite::kFfn,
+                       arena_.d_ffn_out, batch_size, arena_.stream);
       LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_ffn_out,
                                arena_.d_hidden, batch_size, hidden_size,
                                arena_.stream);

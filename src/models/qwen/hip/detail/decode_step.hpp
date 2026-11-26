@@ -6,6 +6,7 @@
 #include "gufo/ext/families/qwen/text/tokenizer.hpp"
 #include "gufo/ext/families/qwen/vision/device_input.hpp"
 #include "src/families/qwen/kernels/ops/ssm.hpp"
+#include "src/models/qwen/hip/projection.hpp"
 
 namespace gufo::models {
 struct QwenModelWeights;
@@ -30,7 +31,8 @@ void ExecuteDecodeStep(
     const QwenExecutionPolicy& policy, tokenization::TokenId token_id,
     std::uint32_t pos, bool compute_logits,
     QwenRecurrentStateIo recurrent_state,
-    models::qwen::vision::DeviceInput* image_input = nullptr);
+    models::qwen::vision::DeviceInput* image_input = nullptr,
+    QwenPassProjection projection = {});
 
 }  // namespace gufo::hip
 

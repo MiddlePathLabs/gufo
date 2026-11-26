@@ -210,6 +210,11 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
   const auto& config = weights.config;
   auto& arena = coordinator->arena_;
   const auto scratch = arena.GetScratchView(batch_size);
+  std::array<std::pair<float, std::size_t>, kMaxDecodeBatch> projection_runs{};
+  for (std::size_t row = 0; row < batch_size; ++row)
+    projection_runs[row] = {items[row].executor->ProjectionLambda(), 1};
+  const QwenPassProjection projection = coordinator->BatchProjection(
+      std::span(projection_runs).first(batch_size));
   const std::size_t hidden_size = config.hidden_size;
   const std::size_t intermediate_size = config.intermediate_size;
   const std::size_t vocab_size = config.vocab_size;
@@ -357,6 +362,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
                        ssm_inner_size, arena.stream);
     }
 
+    projection.Apply(layer_index, models::qwen::QwenProjectionSite::kMixer,
+                     scratch.attention.output.data(), batch_size, arena.stream);
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.attention.output.data(),
         scratch.decode.hidden.data(), batch_size, hidden_size, arena.stream);
@@ -370,6 +377,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
     LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
                      scratch.ffn.out.data(), batch_size, hidden_size,
                      intermediate_size, arena.stream);
+    projection.Apply(layer_index, models::qwen::QwenProjectionSite::kFfn,
+                     scratch.ffn.out.data(), batch_size, arena.stream);
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.ffn.out.data(),
         scratch.decode.hidden.data(), batch_size, hidden_size, arena.stream);
@@ -588,6 +597,12 @@ QwenGpuExecutor::ForwardVerificationBatch(
                            host_positions.data(),
                            batch_size * sizeof(std::uint32_t),
                            hipMemcpyHostToDevice, arena_.stream));
+  std::array<std::pair<float, std::size_t>, kMaxDecodeBatch> projection_runs{};
+  for (std::size_t index = 0; index < items.size(); ++index)
+    projection_runs[index] = {items[index].executor->ProjectionLambda(),
+                              items[index].tokens.size()};
+  const QwenPassProjection projection = coordinator.BatchProjection(
+      std::span(projection_runs).first(items.size()));
   EmitDecodeRouteTelemetry(weights_, coordinator.policy_);
   for (std::uint32_t layer_index = 0; layer_index < config.num_layers;
        ++layer_index) {
@@ -765,6 +780,8 @@ QwenGpuExecutor::ForwardVerificationBatch(
                        ssm_inner_size, arena_.stream);
     }
 
+    projection.Apply(layer_index, models::qwen::QwenProjectionSite::kMixer,
+                     scratch.attention.output.data(), batch_size, arena_.stream);
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.attention.output.data(),
         scratch.decode.hidden.data(), batch_size, hidden_size, arena_.stream);
@@ -778,6 +795,8 @@ QwenGpuExecutor::ForwardVerificationBatch(
     LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
                      scratch.ffn.out.data(), batch_size, hidden_size,
                      intermediate_size, arena_.stream);
+    projection.Apply(layer_index, models::qwen::QwenProjectionSite::kFfn,
+                     scratch.ffn.out.data(), batch_size, arena_.stream);
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.ffn.out.data(),
         scratch.decode.hidden.data(), batch_size, hidden_size, arena_.stream);

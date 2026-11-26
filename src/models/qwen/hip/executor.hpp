@@ -14,11 +14,13 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "src/families/qwen/hip_common/continuation_hooks.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/generator.hpp"
+#include "src/models/qwen/hip/projection.hpp"
 #include "src/models/qwen/state.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -619,6 +621,20 @@ public:
     return arena_.state_account();
   }
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
+  /// Shares the runner's loaded projection with this session; null detaches
+  /// it. The lambda (SetProjectionLambda) starts at zero: unsteered.
+  void SetProjection(std::shared_ptr<const QwenGpuProjection> projection);
+  /// Strength applied to every steered writer of the following passes; zero
+  /// keeps the unmodified arithmetic and launches nothing.
+  void SetProjectionLambda(float lambda) noexcept {
+    projection_lambda_ = lambda;
+  }
+  [[nodiscard]] float ProjectionLambda() const noexcept {
+    return projection_ != nullptr ? projection_lambda_ : 0.0F;
+  }
+  [[nodiscard]] QwenPassProjection PassProjection() const noexcept {
+    return {projection_.get(), ProjectionLambda(), nullptr};
+  }
   void SetCancellationCheck(std::function<bool()> check) {
     cancellation_check_ = std::move(check);
     vision_input_.SetCancellationCheck(cancellation_check_);
@@ -712,6 +728,18 @@ private:
   std::optional<tokenization::TokenId> next_token_;
   bool capture_prompt_hidden_{false};
   bool replaying_ssm_state_{false};
+  std::shared_ptr<const QwenGpuProjection> projection_;
+  float projection_lambda_{0.0F};
+  /// Per-row lambdas of a batched pass this executor coordinates: written in
+  /// pinned host memory, copied to the device array before the pass.
+  float* h_projection_rows_{nullptr};
+  float* d_projection_rows_{nullptr};
+  /// Rows of the per-row lambda arrays (one batched pass at most).
+  static constexpr std::size_t kProjectionRows = kMaxWideVerificationRows;
+  /// The coordinator's per-row projection for a batched pass whose `count`
+  /// rows from `offset` belong to an executor with `lambda`; see the .cpp.
+  [[nodiscard]] QwenPassProjection BatchProjection(
+      std::span<const std::pair<float, std::size_t>> row_runs);
 };
 
 }  // namespace gufo::hip

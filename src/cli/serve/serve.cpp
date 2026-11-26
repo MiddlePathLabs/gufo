@@ -863,9 +863,10 @@ void PrintServeHelp(std::string_view program_name,
                      "mtp-...-shared-*.gguf sidecar)",
                      "Speculative", &mtp_model_path);
     parser.AddOption("", "--projection-vector", "PATH",
-                     "Optional llama.cpp control-vector GGUF for the runtime "
-                     "residual projection (Qwen3.8-Flash-Next; off unless "
-                     "loaded, then per-request)",
+                     "Optional projection GGUF: a llama.cpp control vector "
+                     "for Qwen3.8-Flash-Next, projection.{mixer,ffn}.N "
+                     "directions for Qwen3.8-27B (off unless loaded, then "
+                     "per-request)",
                      "Model", &projection_vector_path);
     parser.AddOption("", "--projection-layers", "LO-HI",
                      "Steered layer range for --projection-vector (default: "
@@ -1640,9 +1641,10 @@ int RunServe(std::span<const char* const> args) {
         "mtp-...-shared-*.gguf sidecar)",
         "Speculative", &mtp_model_path);
     llm_parser.AddOption("", "--projection-vector", "PATH",
-                         "Optional llama.cpp control-vector GGUF for the "
-                         "runtime residual projection (Qwen3.8-Flash-Next; "
-                         "off unless loaded, then per-request)",
+                         "Optional projection GGUF: a llama.cpp control "
+                         "vector for Qwen3.8-Flash-Next, "
+                         "projection.{mixer,ffn}.N directions for "
+                         "Qwen3.8-27B (off unless loaded, then per-request)",
                          "Model", &projection_vector_path);
     llm_parser.AddOption("", "--projection-layers", "LO-HI",
                          "Steered layer range for --projection-vector "

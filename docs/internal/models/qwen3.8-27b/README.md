@@ -35,3 +35,37 @@ turn. Ordered text/image parts, multiple images and later turns work with
 AR/DFlash2 and caches. Official dynamic resizing allows 64–16384 merged image
 tokens. Cache identity includes processed pixels, placement, preprocessing
 version and projector contents. See [vision checks and limits](QUALITY.md#vision).
+
+## Runtime output projection
+
+`--projection-vector FILE.gguf` (serve only) loads F32 `[5120]` tensors named
+`projection.mixer.N` (the `attn_output`/`ssm_out` writer) and
+`projection.ffn.N` (`ffn_down`) for layers `0..63`. Each tensor's norm becomes
+that writer's scale `s` and its direction `v` is normalized. For a steered
+request each writer's output `y` is replaced, before its residual add, by
+`y - s * (y . v) * v`, which equals serving the weight `(I - s v v^T) W`
+without editing the GGUF. A rank-1 refusal ablation stored as per-module
+directions times its coefficients therefore reproduces that ablation.
+`tools/qwen27b/convert_projection.py` converts such a safetensors file
+(module-name keys plus `__coefs__`) into this format.
+`--projection-layers LO-HI` (`0 <= LO <= HI <= 63`) restricts the steered
+layers.
+
+Requests opt in with `"projection": true` (or `--projection-default-on`),
+exactly as on Flash-Next; the server rejects the field when no vector is
+loaded. Unsteered requests launch nothing extra, so their arithmetic is the
+unmodified engine's. A steered pass applies one row-projection kernel per
+writer in single-token decode (the decode graph key carries the lambda, so a
+toggle recaptures once), batched decode and verification (per-row lambdas, so
+steered and unsteered sessions share a batch) and prompt prefill. Prefill
+passes of 1024 rows or more normally take the FP16 route, whose GEMM epilogue
+adds each writer's output into the residual; a steered pass takes the FP32
+route instead, at about 2.25 rather than 1.80 ms per row. The DFlash2 draft is
+not projected; it reads target features after the projected residual adds.
+
+Every prompt-cache identity starts with the request's projection state while
+a vector is loaded, and the persisted-state identity carries the vector's
+SHA-256 and steered range. The loaded directions cost 2.5 MiB of device
+memory (64 x 2 x 5120 F32) plus a 64-float per-row array per session.
+`qwen27b_projection_test` checks the loader and the kernel against a
+double-precision reference.

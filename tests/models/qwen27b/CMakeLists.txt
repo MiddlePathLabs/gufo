@@ -31,6 +31,9 @@ endfunction()
 add_qwen27b_test(qwen27b_vision_test vision_test.cpp "cpu;vision;correctness")
 add_qwen27b_test(qwen27b_continuation_layout_test continuation_layout_test.cpp
   "cpu;correctness")
+# Loader checks run everywhere; a HIP build adds the row-projection kernel.
+add_qwen27b_test(qwen27b_projection_test projection_test.cpp
+  "cpu;projection;correctness")
 
 add_qwen27b_test(qwen_mtp_reference_test mtp_reference_test.cpp
   "cpu;mtp;external-model")

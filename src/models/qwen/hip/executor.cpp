@@ -80,7 +80,55 @@ QwenGpuExecutor::~QwenGpuExecutor() {
   if (d_verification_logits_ != nullptr) {
     (void)hipFree(d_verification_logits_);
   }
+  if (d_projection_rows_ != nullptr)
+    (void)hipFree(d_projection_rows_);
+  if (h_projection_rows_ != nullptr)
+    (void)hipHostFree(h_projection_rows_);
   FreeGpuSamplingWorkspace(&sampling_workspace_);
+}
+
+void QwenGpuExecutor::SetProjection(
+    std::shared_ptr<const QwenGpuProjection> projection) {
+  if (projection != nullptr &&
+      projection->Hidden() != weights_.config.hidden_size)
+    throw std::invalid_argument("projection width does not match the model");
+  if (projection != nullptr && d_projection_rows_ == nullptr) {
+    HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_projection_rows_),
+                        kProjectionRows * sizeof(float)));
+    HIP_CHECK(hipHostMalloc(reinterpret_cast<void**>(&h_projection_rows_),
+                            kProjectionRows * sizeof(float),
+                            hipHostMallocDefault));
+  }
+  projection_ = std::move(projection);
+}
+
+QwenPassProjection QwenGpuExecutor::BatchProjection(
+    std::span<const std::pair<float, std::size_t>> row_runs) {
+  // Every run steered alike folds into one scalar lambda; a mixed batch
+  // writes one lambda per row. The pinned rows are rewritten only here, at
+  // the start of a pass: the previous pass synchronized the stream before
+  // returning its tokens, so its copy has completed.
+  if (projection_ == nullptr || row_runs.empty())
+    return {};
+  const float first = row_runs.front().first;
+  std::size_t rows = 0;
+  bool uniform = true;
+  for (const auto& [lambda, count] : row_runs) {
+    uniform &= lambda == first;
+    rows += count;
+  }
+  if (uniform)
+    return {projection_.get(), first, nullptr};
+  if (rows > kProjectionRows)
+    throw std::length_error("projection batch exceeds its row capacity");
+  std::size_t row = 0;
+  for (const auto& [lambda, count] : row_runs)
+    for (std::size_t i = 0; i < count; ++i)
+      h_projection_rows_[row++] = lambda;
+  HIP_CHECK(hipMemcpyAsync(d_projection_rows_, h_projection_rows_,
+                           rows * sizeof(float), hipMemcpyHostToDevice,
+                           arena_.stream));
+  return {projection_.get(), 0.0F, d_projection_rows_};
 }
 
 void QwenGpuExecutor::EnsureVerificationLogits(std::size_t batch_size) {

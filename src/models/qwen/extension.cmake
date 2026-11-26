@@ -22,6 +22,7 @@ gufo_extension_target(
     mtp_reference.cpp
     dflash_weights.cpp
     probe.cpp
+    projection.cpp
     continuation_identity.cpp
     extension.cpp
   LINK_LIBRARIES
@@ -52,6 +53,7 @@ gufo_extension_target(
     hip/model_loader.cpp
     hip/prefill.cpp
     hip/prefill_chunk.cpp
+    hip/projection.cpp
     hip/prompt_hidden_buffer.cpp
     hip/qwen_speculative_verifier.cpp
     hip/ssm_replay.cpp
@@ -77,6 +79,7 @@ if(TARGET gufo_qwen_hip)
   gufo_extension_hip_sources(gufo_qwen_hip
     SOURCES
       hip/attention.hip
+      hip/projection.hip
   )
   target_compile_definitions(gufo_qwen_hip PUBLIC ENGINE_ENABLE_HIP=1)
   target_include_directories(gufo_qwen_hip SYSTEM PUBLIC

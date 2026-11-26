@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -41,6 +42,7 @@
 #include "src/models/qwen/hip/qwen_speculative_verifier.hpp"
 #include "src/models/qwen/prefill_groups.hpp"
 #include "src/models/qwen/probe.hpp"
+#include "src/models/qwen/projection.hpp"
 
 namespace gufo::models::qwen {
 namespace {
@@ -122,7 +124,8 @@ std::optional<std::size_t> CountQwenPromptTokens(
 TextPreparedPrompt PrepareQwenPrompt(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
-    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
+    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache,
+    bool projection_loaded) {
   const bool has_images = std::ranges::any_of(
       request.messages, [](const auto& m) { return !m.images.empty(); });
   const auto options = QwenChatOptions(request, max_context);
@@ -136,17 +139,34 @@ TextPreparedPrompt PrepareQwenPrompt(
           encoder && has_images ? encoder->identity() : std::string_view{},
           max_context, request.cache_prompt ? &image_cache : nullptr));
   const auto cache_prefix = prompt->stable_prefix_tokens;
-  if (prompt->images.empty())
-    return {std::move(prompt->tokens), {}, cache_prefix};
+  // While a projection vector is loaded, the request's projection state leads
+  // every cache identity, each image-prefix boundary included: state
+  // prefilled steered must never be restored for an unsteered request, or the
+  // reverse, so cross-state requests prefill again.
+  std::vector<std::uint8_t> projection_identity;
+  if (projection_loaded)
+    projection_identity.assign(1, request.projection.value_or(false) ? 1 : 0);
+  if (prompt->images.empty()) {
+    if (!projection_loaded)
+      return {std::move(prompt->tokens), {}, cache_prefix};
+    auto context = std::make_shared<QwenImageContext>();
+    context->cache_identity = std::move(projection_identity);
+    return {std::move(prompt->tokens), std::move(context), cache_prefix};
+  }
   if (!encoder)
     throw std::invalid_argument(
         "image input requires a matching --mmproj BF16 sidecar");
+  const auto with_projection = [&](std::span<const std::uint8_t> identity) {
+    std::vector<std::uint8_t> bytes = projection_identity;
+    bytes.insert(bytes.end(), identity.begin(), identity.end());
+    return bytes;
+  };
   auto context = std::make_shared<QwenImageContext>();
-  context->cache_identity = prompt->cache_identity;
+  context->cache_identity = with_projection(prompt->cache_identity);
   for (const auto& image : prompt->images) {
-    const auto identity = prompt->IdentityForPrefix(image.grid.offset);
     context->cache_prefixes.push_back(
-        {image.grid.offset, {identity.begin(), identity.end()}});
+        {image.grid.offset,
+         with_projection(prompt->IdentityForPrefix(image.grid.offset))});
   }
   context->prompt = prompt;
   return {prompt->tokens, std::move(context), cache_prefix};
@@ -184,7 +204,8 @@ public:
   QwenTextRunnerState(std::shared_ptr<const hip::QwenGpuModel> model,
                       models::qwen::ContinuationAdapter& adapter,
                       cache::Slot& slot,
-                      speculative::SpeculativeOptions options)
+                      speculative::SpeculativeOptions options,
+                      std::shared_ptr<const hip::QwenGpuProjection> projection)
       : model_(std::move(model)),
         executor_(&adapter.GetExecutor(slot)),
         draft_backend_(adapter.GetDraftBackend(slot)),
@@ -196,6 +217,9 @@ public:
         resume_tokens_(adapter.GetFrontier(slot).pending) {
     resume_tokens_.reserve(kQwenMaxResumeTokens);
     rollback_tokens_.reserve(kQwenMaxResumeTokens);
+    // A rebound slot starts unsteered; the host opts in per request.
+    executor_->SetProjection(std::move(projection));
+    executor_->SetProjectionLambda(0.0F);
     if (draft_backend_) {
       verifier_ = hip::CreateQwenGpuSpeculativeVerifier(
           *executor_, *draft_backend_, options);
@@ -206,6 +230,9 @@ public:
 
   void SetCancellationCheck(const CancellationCheck& check) override {
     executor_->SetCancellationCheck(check);
+  }
+  void SetProjectionEnabled(bool enabled) override {
+    executor_->SetProjectionLambda(enabled ? 1.0F : 0.0F);
   }
   ~QwenTextRunnerState() override { executor_->SetCancellationCheck({}); }
   [[nodiscard]] std::shared_ptr<mem::StateAccount> state_account()
@@ -704,10 +731,26 @@ public:
     }
     return std::make_unique<QwenTextRunnerState>(
         model_, dynamic_cast<models::qwen::ContinuationAdapter&>(adapter), slot,
-        verifier_options);
+        verifier_options, projection_);
   }
   /// Caps wide copy verification; call before any state is bound.
   void LimitCopyRows(std::uint32_t rows) noexcept { copy_rows_ = rows; }
+  /// Loads the runtime projection every session may opt into; call before
+  /// any cache resource or state is created. The persisted-state identity
+  /// carries the vector's fingerprint and steered range, so changing either
+  /// invalidates disk entries.
+  void SetProjection(std::shared_ptr<const hip::QwenGpuProjection> projection) {
+    projection_ = std::move(projection);
+    if (projection_ == nullptr)
+      return;
+    const auto& host = projection_->Host();
+    const std::string identity =
+        "projection-v1;layers=" + std::to_string(host.first_layer) + "-" +
+        std::to_string(host.last_layer) + ";sha256=" +
+        projection_->Fingerprint();
+    component_identity_.insert(component_identity_.end(), identity.begin(),
+                               identity.end());
+  }
   void ReconcileComponentState(TextRunnerState& state,
                                std::size_t position) const override {
     auto& qwen = RequireQwenState(state);
@@ -746,6 +789,7 @@ public:
                 .in_pass_checkpoint = true,
                 .partial_prefill_retention = true,
                 .prefill_rollback = true,
+                .runtime_projection = projection_ != nullptr,
                 .max_in_pass_checkpoints = kMaxInPassCheckpoints,
             },
         .sampling_defaults = QwenSamplingDefaults(model_->GetConfig()),
@@ -872,7 +916,7 @@ public:
       const ChatRequest& request) const override {
     return PrepareQwenPrompt(request, model_->GetTokenizer(),
                              model_->VisionEncoder(), max_context_,
-                             image_cache_);
+                             image_cache_, projection_ != nullptr);
   }
 
   [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
@@ -1349,6 +1393,7 @@ private:
   std::uint32_t copy_rows_{static_cast<std::uint32_t>(
       hip::QwenGpuExecutor::kMaxWideVerificationRows)};
   cache::Identity component_identity_;
+  std::shared_ptr<const hip::QwenGpuProjection> projection_;
   mutable std::mutex hidden_state_mutex_;
   mutable std::unique_ptr<hip::QwenGpuExecutor> hidden_state_executor_;
 };
@@ -1499,9 +1544,35 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
           ? speculative::DFlashDraftPolicy::kFixed
           : speculative::DFlashDraftPolicy::kAdaptive;
   const bool speculative = dflash_model != nullptr;
+  std::shared_ptr<const hip::QwenGpuProjection> projection;
+  if (!options.projection_vector_path.empty()) {
+    const auto& config = model->GetConfig();
+    QwenProjection host;
+    std::string warning;
+    std::string projection_error;
+    if (!LoadQwenProjection(options.projection_vector_path, config.num_layers,
+                            config.hidden_size, "qwen35", &host,
+                            &projection_error, &warning) ||
+        !SelectQwenProjectionLayers(options.projection_layers, &host,
+                                    &projection_error)) {
+      if (error)
+        *error = projection_error;
+      return nullptr;
+    }
+    if (!warning.empty())
+      std::fprintf(stderr, "gufo: warning: %s\n", warning.c_str());
+    projection = hip::QwenGpuProjection::Create(std::move(host),
+                                                &projection_error);
+    if (!projection) {
+      if (error)
+        *error = projection_error;
+      return nullptr;
+    }
+  }
   auto runner = std::make_shared<QwenTextRunner>(
       std::move(model), max_context, std::move(dflash_model),
       speculative_options, dflash_policy, model_fingerprint, draft_fingerprint);
+  runner->SetProjection(std::move(projection));
   // Each session's wide copies need a larger SSM replay ring (ResourceClaim).
   // Narrow the width until the configured sessions fit, rather than refusing
   // a session count the ordinary verifier width fits.

@@ -34,7 +34,8 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
                        tokenization::TokenId token_id, std::uint32_t pos,
                        bool compute_logits,
                        QwenRecurrentStateIo recurrent_state,
-                       models::qwen::vision::DeviceInput* image_input) {
+                       models::qwen::vision::DeviceInput* image_input,
+                       QwenPassProjection projection) {
   const auto* rope = image_input != nullptr ? image_input->rope() : nullptr;
   (void)token_id;
   const auto& config = weights.config;
@@ -212,6 +213,8 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
     }
 
     {
+      projection.Apply(l, models::qwen::QwenProjectionSite::kMixer,
+                       attention_scratch.output.data(), 1, arena.stream);
       gufo::models::qwen::ResidualAdd(module_ctx, decode_scratch.hidden,
                                       attention_scratch.output);
 
@@ -237,6 +240,8 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
     }
 
     // Residual Add
+    projection.Apply(l, models::qwen::QwenProjectionSite::kFfn,
+                     ffn_scratch.out.data(), 1, arena.stream);
     gufo::models::qwen::ResidualAdd(module_ctx, decode_scratch.hidden,
                                     ffn_scratch.out);
 
