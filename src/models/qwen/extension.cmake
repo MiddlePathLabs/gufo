@@ -113,6 +113,9 @@ if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
   add_executable(qwen27b_continuation_probe EXCLUDE_FROM_ALL
     ${PROJECT_SOURCE_DIR}/tests/models/qwen27b/continuation_probe.cpp)
   target_link_libraries(qwen27b_continuation_probe PRIVATE ${GUFO_QWEN_LIBRARIES})
+  add_executable(qwen27b_projection_kld EXCLUDE_FROM_ALL
+    ${PROJECT_SOURCE_DIR}/tools/qwen27b/projection_kld.cpp)
+  target_link_libraries(qwen27b_projection_kld PRIVATE ${GUFO_QWEN_LIBRARIES})
   add_executable(qwen27b_verify_sweep EXCLUDE_FROM_ALL
     ${PROJECT_SOURCE_DIR}/tools/qwen27b/verify_sweep/sweep.hip)
   target_link_libraries(qwen27b_verify_sweep PRIVATE ${GUFO_QWEN_LIBRARIES} hip::device)

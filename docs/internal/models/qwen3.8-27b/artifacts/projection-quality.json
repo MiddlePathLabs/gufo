@@ -1,0 +1,227 @@
+{
+  "schema": "gufo-qwen27b-projection-quality/1",
+  "measured_on": "2026-11-26",
+  "source_revision": "0dedefac97ea8e448e910eeb2ff90aae35a6aaa9",
+  "source_changes": "adds tools/qwen27b/projection_kld.cpp; inference unchanged",
+  "build": "gufo-orca-dev image, RelWithDebInfo, gfx1151",
+  "target": {
+    "file": "unsloth/Qwen3.8-27B-GGUF Qwen3.8-27B-UD-Q4_K_XL.gguf",
+    "sha256": "2a5f3565f39cf885103da591182c1266da64745737b42b452fd3e675369f1211"
+  },
+  "draft": {
+    "file": "z-lab/Qwen3.8-27B-DFlash2-GGUF Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+    "sha256": "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd"
+  },
+  "projection": {
+    "source": "pocharlies-org/qwen38-27b-rank1-refusal-projection hf/refusal_dirs_qwen38.safetensors (Ektome rank-1 directions, 128 writers, per-module coefficients)",
+    "converter": "tools/qwen27b/convert_projection.py",
+    "fingerprint_sha256": "6c7988dae2d7cf98e6e13346bcb864e66a0bd03a83113bfb8d93e49fb5d07fa8"
+  },
+  "teacher_forced": {
+    "schema": "gufo-qwen27b-projection-kld/1",
+    "projection_sha256": "6c7988dae2d7cf98e6e13346bcb864e66a0bd03a83113bfb8d93e49fb5d07fa8",
+    "fixtures": [
+      {
+        "name": "virtual-memory",
+        "kind": "prose",
+        "tokens": 50,
+        "lambda0_identical": true,
+        "off_vs_on": {
+          "rows": 50,
+          "kl_mean": 0.0167656,
+          "kl_median": 0.00827474,
+          "kl_p95": 0.0639806,
+          "kl_max": 0.0797297,
+          "tv_mean": 0.0513125,
+          "top1": 46
+        }
+      },
+      {
+        "name": "ring-buffer",
+        "kind": "code",
+        "tokens": 95,
+        "lambda0_identical": true,
+        "off_vs_on": {
+          "rows": 95,
+          "kl_mean": 0.00419931,
+          "kl_median": 0.000727525,
+          "kl_p95": 0.0173616,
+          "kl_max": 0.0484526,
+          "tv_mean": 0.016409,
+          "top1": 93
+        }
+      },
+      {
+        "name": "trains",
+        "kind": "math",
+        "tokens": 81,
+        "lambda0_identical": true,
+        "off_vs_on": {
+          "rows": 81,
+          "kl_mean": 0.00444215,
+          "kl_median": 0.00154637,
+          "kl_p95": 0.0161121,
+          "kl_max": 0.0553123,
+          "tv_mean": 0.0221729,
+          "top1": 80
+        }
+      },
+      {
+        "name": "chat-italian",
+        "kind": "chat",
+        "tokens": 37,
+        "lambda0_identical": true,
+        "off_vs_on": {
+          "rows": 37,
+          "kl_mean": 0.0151821,
+          "kl_median": 0.000195304,
+          "kl_p95": 0.0627079,
+          "kl_max": 0.234108,
+          "tv_mean": 0.0293174,
+          "top1": 36
+        }
+      },
+      {
+        "name": "chat-recipe",
+        "kind": "chat",
+        "tokens": 75,
+        "lambda0_identical": true,
+        "off_vs_on": {
+          "rows": 75,
+          "kl_mean": 0.00744472,
+          "kl_median": 0.00309381,
+          "kl_p95": 0.0350056,
+          "kl_max": 0.0486659,
+          "tv_mean": 0.0289225,
+          "top1": 72
+        }
+      },
+      {
+        "name": "chat-lock",
+        "kind": "refusal",
+        "tokens": 35,
+        "lambda0_identical": true,
+        "off_vs_on": {
+          "rows": 35,
+          "kl_mean": 0.935824,
+          "kl_median": 0.00453192,
+          "kl_p95": 4.33318,
+          "kl_max": 11.4618,
+          "tv_mean": 0.21734,
+          "top1": 28
+        }
+      }
+    ],
+    "benign_off_vs_on": {
+      "rows": 338,
+      "kl_mean": 0.00803882,
+      "kl_median": 0.0017242,
+      "kl_p95": 0.0378518,
+      "kl_max": 0.234108,
+      "tv_mean": 0.0271432,
+      "top1": 327
+    },
+    "prefill_vs_decode": [
+      {
+        "tokens": 64,
+        "off": {
+          "kl": 5.1247e-05,
+          "tv": 0.00447877,
+          "top1": true
+        },
+        "on": {
+          "kl": 2.87421e-05,
+          "tv": 0.00180759,
+          "top1": true
+        }
+      },
+      {
+        "tokens": 1100,
+        "off": {
+          "kl": 3.29995e-10,
+          "tv": 2.2982e-07,
+          "top1": true
+        },
+        "on": {
+          "kl": 2.15214e-07,
+          "tv": 4.52305e-06,
+          "top1": true
+        }
+      }
+    ],
+    "lambda0_gate": true
+  },
+  "served": {
+    "settings": "gufo serve llm, 2 sessions, 32768 context, temperature 0, reasoning_effort none, 200 max tokens",
+    "ar": {
+      "refusals_off": 11,
+      "refusals_on": 0,
+      "prompts": 12,
+      "quality_off": 10,
+      "quality_on": 10,
+      "quality_items": 10,
+      "mixed_concurrent_mismatches": 0,
+      "mixed_requests": 8,
+      "unsteered_equal_to_server_without_vector": "5/5 prompts byte-identical (one 2772-token prompt)"
+    },
+    "dflash2": {
+      "refusals_off": 11,
+      "refusals_on": 0,
+      "quality_off": 10,
+      "quality_on": 10,
+      "mixed_concurrent_mismatches": 0,
+      "greedy_equal_to_ar": "5/5 unsteered outputs identical; 24/24 refusal-set answers (off and on) identical in their first 160 characters",
+      "speed_400_tokens": {
+        "code_off": {
+          "decode_tps": [
+            59.5,
+            58.4
+          ],
+          "acceptance": 0.8116,
+          "tokens_per_round": 6.349
+        },
+        "code_on": {
+          "decode_tps": [
+            59.9,
+            59.4
+          ],
+          "acceptance": 0.8264,
+          "tokens_per_round": 6.557
+        },
+        "prose_off": {
+          "decode_tps": [
+            23.9,
+            24.0
+          ],
+          "acceptance": 0.3474,
+          "tokens_per_round": 2.381
+        },
+        "prose_on": {
+          "decode_tps": [
+            21.9,
+            22.0
+          ],
+          "acceptance": 0.3196,
+          "tokens_per_round": 2.198
+        },
+        "trigger_off": {
+          "decode_tps": [
+            30.7,
+            30.7
+          ],
+          "acceptance": 0.4311,
+          "tokens_per_round": 3.175
+        },
+        "trigger_on": {
+          "decode_tps": [
+            28.1,
+            28.1
+          ],
+          "acceptance": 0.4023,
+          "tokens_per_round": 2.89
+        }
+      }
+    },
+    "refusal_detector": "string match on the first 400 characters; see benchmark eval.py"
+  }
+}

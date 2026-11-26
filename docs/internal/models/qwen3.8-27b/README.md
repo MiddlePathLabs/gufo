@@ -68,4 +68,5 @@ a vector is loaded, and the persisted-state identity carries the vector's
 SHA-256 and steered range. The loaded directions cost 2.5 MiB of device
 memory (64 x 2 x 5120 F32) plus a 64-float per-row array per session.
 `qwen27b_projection_test` checks the loader and the kernel against a
-double-precision reference.
+double-precision reference; `qwen27b_projection_kld` measures the served
+model's divergence. Results are in [Quality](QUALITY.md#runtime-projection).

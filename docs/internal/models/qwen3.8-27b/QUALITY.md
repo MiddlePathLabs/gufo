@@ -245,6 +245,42 @@ acceptance, full-vocabulary residual correction, nonfinite inputs and replay.
 replay requires the same configuration. GPU/CPU distributions have numerical
 tolerances, not bit-identical upstream sampler parity.
 
+## Runtime projection
+
+November 26, 2026: Q4_K_XL target with the Ektome rank-1 refusal directions
+(128 writers, per-module coefficients) loaded through
+[`--projection-vector`](README.md#runtime-output-projection). Teacher-forced
+decode over six fixtures with the full 248,320-token vocabulary
+(`qwen27b_projection_kld`):
+
+| Check | Result |
+| --- | --- |
+| Vector loaded, lambda 0, against no vector | Logits byte-identical on all 373 rows |
+| Projection on against off, five benign fixtures | Mean KL 0.00804 nats, median 0.00172, p95 0.0379, max 0.234; top-1 agreement 327/338 |
+| Projection on against off, refusal fixture | Mean KL 0.936 nats, max 11.5 at the answer's first tokens |
+| One prompt pass against token-by-token decode, steered | KL 2.87e-5 (64 tokens), 2.15e-7 (1,100 tokens) |
+| Same, unsteered | KL 5.12e-5 (64 tokens), 3.30e-10 (1,100 tokens) |
+
+The benign shift is about five times the Q4_K_XL-versus-BF16 quantization KL
+above, with a median close to it: the projection changes the model, mostly at
+a few tokens. Steered prefill agrees with steered decode as closely as the
+unsteered routes do, so no prefill writer misses the projection.
+
+Served at temperature 0 with thinking off, two sessions, 200 tokens:
+
+| Check | AR | DFlash2 |
+| --- | --- | --- |
+| Refusals on 12 borderline prompts, off / on | 11 / 0 | 11 / 0 |
+| Short arithmetic and facts, off / on | 10/10 / 10/10 | 10/10 / 10/10 |
+| Concurrent off/on requests against solo outputs | 0/8 differ | 0/8 differ |
+| Greedy output against AR | | Identical, steered and unsteered |
+
+With DFlash2, 400-token decode runs at 58.4–59.5 tokens/s off and 59.4–59.9
+on for code, 23.9–24.0 against 21.9–22.0 for prose and 30.7 against 28.1 for a
+refusal-trigger prompt: the unprojected draft accepts fewer of the steered
+target's tokens outside code. Refusal detection is a string match, not a
+graded benchmark. Details are in [the record](artifacts/projection-quality.json).
+
 ## Vision
 
 Earlier Q4/Q8 AR and DFlash2 checks cover multi-image, sampled/greedy C4,
